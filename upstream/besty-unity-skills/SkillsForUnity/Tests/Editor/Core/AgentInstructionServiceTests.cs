@@ -138,6 +138,16 @@ namespace UnitySkills.Tests.Core
         }
 
         [Test]
+        public void UpsertBlock_PreviousInstruction_ReplacesOnlyTheManagedLine()
+        {
+            var path = TempFile("CLAUDE.md");
+            File.WriteAllText(path, "# My Rules\n\nWhen working on a Unity project, use Unity Skills.\n");
+
+            Assert.That(AgentInstructionService.UpsertBlock(path), Is.True);
+            Assert.That(File.ReadAllText(path), Is.EqualTo("# My Rules\n\n" + AgentInstructionService.InstructionLine + "\n"));
+        }
+
+        [Test]
         public void UpsertBlock_DuplicateLines_AreDeduped()
         {
             var path = TempFile("AGENTS.md");

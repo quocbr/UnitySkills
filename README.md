@@ -42,6 +42,12 @@ Cập nhật bằng cách dán lại cùng URL vào **Install package from Git U
 
 Sau khi cập nhật gói, dùng **AI Config → Cập nhật (Project)** hoặc **Cập nhật (Global)** cho agent đang dùng để nhận nội dung skill mới. Khi cài từ workspace bằng Python, thêm `--migrate` để sao lưu bản Workbench cũ trước khi thay thế.
 
+### Tự gọi skill khi viết hoặc review C# trong Claude Code
+
+Sau khi cài hoặc cập nhật skill cho **Claude Code** trong **AI Config**, mở **⚙ Cài đặt → Công cụ AI → Thêm hướng dẫn vào tệp chỉ dẫn của agent**. Với bản cài Project, Workbench thêm hướng dẫn vào `CLAUDE.md` ở gốc dự án. Mở lại Claude Code từ thư mục dự án để nạp hướng dẫn.
+
+Thử gửi `Review JourneyPanel.cs, tìm nguyên nhân nút Use không chạy. Chỉ đọc.` mà không gõ `/unity-skills`. Hướng dẫn ưu tiên `unity-skills` cho tác vụ liên quan đến API, hành vi hoặc công cụ Unity. Khi chưa có hướng dẫn phù hợp, agent có thể dùng skill khác hoặc tiếp tục bằng quy trình coding và review thông thường. Xem lượt gọi skill trong phiên để kiểm tra.
+
 ## Bật hoặc tắt skill
 
 Trong **Window → UnitySkills → Skills**, bỏ dấu chọn cạnh tên một skill hoặc cạnh tiêu đề nhóm để tắt. Chọn lại để bật. Lựa chọn được lưu riêng cho từng project. Khi bật lại một nhóm, trạng thái riêng của từng skill trong nhóm vẫn được áp dụng.

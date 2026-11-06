@@ -12,7 +12,7 @@ namespace UnitySkills
     /// (CLAUDE.md for Claude Code, AGENTS.md for most others, GEMINI.md for Antigravity's global scope).
     /// Off by default; the settings drawer toggle flips <see cref="Enabled"/>.
     ///
-    /// The injected content is one plain sentence with no marker comments, so it costs the user as
+    /// The injected content is one plain line with no marker comments, so it costs the user as
     /// few context tokens as possible. Detection matches the exact known wording(s): upsert is
     /// idempotent, toggle-off removes exactly our line (plus the blank separator line we added) and
     /// deletes the file when it held nothing else. One trade-off of marker-less detection: a line the
@@ -47,12 +47,15 @@ namespace UnitySkills
         // Path-free because the project-scope AGENTS.md is shared by five tools with different skill
         // directories, and global-scope files serve every project. Its only job is to bias skill
         // selection; once picked, the tool's own skill system loads SKILL.md for the details.
-        internal const string InstructionLine = "When working on a Unity project, use Unity Skills.";
+        internal const string InstructionLine =
+            "For tasks involving Unity APIs, behavior, or tools, invoke the `unity-skills` skill when relevant, even if the request only mentions a filename or describes a bug. " +
+            "If `unity-skills` has no relevant guidance, use a more suitable skill or proceed with the usual coding or code review workflow. " +
+            "For read-only requests, leave files and Unity Editor data unchanged.";
 
-        // Pre-release dev wordings, which shipped wrapped in marker comments. Kept so installs from
-        // that window get migrated (upsert replaces them) instead of leaving orphaned text behind.
+        // Older shipped wordings, including pre-release lines wrapped in marker comments.
         private static readonly string[] LegacyLines =
         {
+            "When working on a Unity project, use Unity Skills.",
             "When working on this Unity project, prefer the \"unity-skills\" skill and follow its SKILL.md for Editor operations.",
             "When working on this Unity project, prefer using the installed Unity Skills (\"unity-skills\" skill, REST API on localhost:8090+) for Editor operations over manual scene/asset edits."
         };
