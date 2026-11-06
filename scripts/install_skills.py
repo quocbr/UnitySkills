@@ -59,10 +59,13 @@ def install(project, agent, migrate=False):
     legacy = legacy_skills(destination)
     installed = destination / TEMPLATE.name
     already_present = installed not in legacy and matches(TEMPLATE, installed)
+    if not already_present and installed not in legacy and same_file(installed / "EDITOR.md", TEMPLATE / "EDITOR.md"):
+        if (installed / "references" / "workflows.md").is_file():
+            legacy.append(installed)
     if (installed.exists() or installed.is_symlink()) and not already_present and installed not in legacy:
         raise FileExistsError(f"Existing skill differs. Move it before retrying: {installed}")
     if legacy and not migrate:
-        raise FileExistsError(f"Found {len(legacy)} separate Unity skills. Rerun with --migrate to back them up and merge.")
+        raise FileExistsError(f"Found {len(legacy)} previous Unity skill installs. Rerun with --migrate to back them up and update.")
 
     destination.mkdir(parents=True, exist_ok=True)
     with TemporaryDirectory(prefix=".unity-skills-", dir=destination) as temporary:
@@ -89,7 +92,7 @@ def install(project, agent, migrate=False):
                     if not path.exists() and not path.is_symlink():
                         (backup / path.name).rename(path)
                 raise
-            print(f"Backed up {len(legacy)} separate skills to {backup}")
+            print(f"Backed up {len(legacy)} previous skill installs to {backup}")
         elif not already_present:
             staged.rename(installed)
 
@@ -100,7 +103,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--project", type=Path, default=ROOT, help="Unity project (default: this repository)")
     parser.add_argument("--agent", choices=AGENT_DIRECTORIES, default="codex")
-    parser.add_argument("--migrate", action="store_true", help="Back up recognized separate Unity skills before installing")
+    parser.add_argument("--migrate", action="store_true", help="Back up recognized previous Unity skills before installing")
     args = parser.parse_args()
     try:
         install(args.project.resolve(), args.agent, args.migrate)

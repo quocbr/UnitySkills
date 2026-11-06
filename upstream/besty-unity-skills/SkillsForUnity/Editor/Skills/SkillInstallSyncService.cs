@@ -200,7 +200,7 @@ namespace UnitySkills
                     }
 
                     var installedVersion = target.InstalledVersion?.Invoke();
-                    switch (SkillInstaller.CompareInstalledVersion(installedVersion, SkillsLogger.Version))
+                    switch (SkillInstaller.CompareInstalledCopy(installedVersion, target.Path))
                     {
                         case SkillInstaller.InstalledVersionState.Current:
                             report.SkippedUpToDate++;

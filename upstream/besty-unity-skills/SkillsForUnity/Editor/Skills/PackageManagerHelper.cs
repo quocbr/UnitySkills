@@ -385,6 +385,7 @@ namespace UnitySkills
         /// </summary>
         internal static SelfInstallKind DetectSelfInstallKind()
         {
+            if (SkillInstaller.IsWorkbenchPackage) return SelfInstallKind.Unsupported;
             try
             {
                 var manifestPath = Path.Combine(Application.dataPath, "..", "Packages", "manifest.json");

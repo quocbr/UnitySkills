@@ -550,31 +550,85 @@ namespace UnitySkills
             }
         }
 
+        private const string WorkbenchRevisionFile = "workbench-revision.txt";
+        private const string PreviousWorkbenchVersion = "2.9.1";
+        private static readonly Lazy<bool> _isWorkbenchPackage = new Lazy<bool>(() =>
+        {
+            var path = GetSkillPackagePath();
+            return !string.IsNullOrEmpty(path) && File.Exists(GetWorkbenchArchivePath(path));
+        });
+
+        internal static bool IsWorkbenchPackage => _isWorkbenchPackage.Value;
+
+        internal static InstalledVersionState CompareInstalledCopy(string installedVersion, string targetPath)
+        {
+            var state = CompareInstalledVersion(installedVersion, SkillsLogger.Version);
+            // The first Workbench release has its own version line; recognize older Workbench content by its template.
+            if ((state == InstalledVersionState.Current || installedVersion == PreviousWorkbenchVersion) &&
+                !string.IsNullOrEmpty(targetPath) && HasWorkbenchTemplateUpdate(targetPath))
+                return InstalledVersionState.Older;
+            return state;
+        }
+
+        internal static bool HasWorkbenchTemplateUpdate(string targetPath)
+        {
+            var installedRevision = Path.Combine(targetPath, WorkbenchRevisionFile);
+            if (!File.Exists(installedRevision) &&
+                (!File.Exists(Path.Combine(targetPath, "EDITOR.md")) ||
+                 !File.Exists(Path.Combine(targetPath, "references", "workflows.md")) ||
+                 File.Exists(Path.Combine(targetPath, "skills", "SKILL.md"))))
+                return false;
+
+            string revision;
+            var projectTemplate = GetProjectTemplatePath();
+            if (Directory.Exists(projectTemplate))
+            {
+                var sourceRevision = Path.Combine(projectTemplate, WorkbenchRevisionFile);
+                if (!File.Exists(sourceRevision)) return false;
+                revision = File.ReadAllText(sourceRevision).Trim();
+            }
+            else
+            {
+                var packagePath = GetSkillPackagePath();
+                if (string.IsNullOrEmpty(packagePath)) return false;
+                var archive = GetWorkbenchArchivePath(packagePath);
+                if (!File.Exists(archive)) return false;
+                using var bundle = ZipFile.OpenRead(archive);
+                var entry = bundle.GetEntry(WorkbenchRevisionFile);
+                if (entry == null) return false;
+                using var reader = new StreamReader(entry.Open());
+                revision = reader.ReadToEnd().Trim();
+            }
+
+            return revision.Length != 0 && (!File.Exists(installedRevision) ||
+                !string.Equals(revision, File.ReadAllText(installedRevision).Trim(), StringComparison.Ordinal));
+        }
+
+        private static string GetProjectTemplatePath() =>
+            Path.GetFullPath(Path.Combine(Application.dataPath, "..", "unity-skills"));
+
+        private static string GetWorkbenchArchivePath(string packagePath) =>
+            Path.Combine(packagePath, "workbench-skill~", "template.zip");
+
+        private static string GetSkillPackagePath()
+        {
+            var packageInfo = UnityEditor.PackageManager.PackageInfo.FindForAssembly(typeof(SkillInstaller).Assembly);
+            if (!string.IsNullOrEmpty(packageInfo?.resolvedPath)) return packageInfo.resolvedPath;
+            return UnityEditor.PackageManager.PackageInfo.FindForAssetPath("Packages/com.besty.unity-skills")?.resolvedPath;
+        }
+
         private static SkillTemplate OpenSkillTemplate()
         {
-            string templateRoot;
-
             // 1. Project root (development / local clone)
-            templateRoot = Path.GetFullPath(Path.Combine(Application.dataPath, "..", "unity-skills"));
+            var templateRoot = GetProjectTemplatePath();
             if (Directory.Exists(templateRoot))
                 return new SkillTemplate(templateRoot);
 
             // 2. Inside the UPM package (tilde folders are hidden from Unity's asset import)
-            string resolvedPath = null;
-            var packageInfo = UnityEditor.PackageManager.PackageInfo.FindForAssembly(typeof(SkillInstaller).Assembly);
-            if (packageInfo != null)
-                resolvedPath = packageInfo.resolvedPath;
-
-            if (string.IsNullOrEmpty(resolvedPath))
-            {
-                packageInfo = UnityEditor.PackageManager.PackageInfo.FindForAssetPath("Packages/com.besty.unity-skills");
-                if (packageInfo != null)
-                    resolvedPath = packageInfo.resolvedPath;
-            }
-
+            var resolvedPath = GetSkillPackagePath();
             if (!string.IsNullOrEmpty(resolvedPath))
             {
-                var archive = Path.Combine(resolvedPath, "workbench-skill~", "template.zip");
+                var archive = GetWorkbenchArchivePath(resolvedPath);
                 if (File.Exists(archive))
                     return SkillTemplate.Extract(archive);
 

@@ -269,6 +269,22 @@ namespace UnitySkills.Tests.Core
         }
 
         [Test]
+        public void PreviousWorkbenchVersion_OnlyMigratesUnifiedWorkbenchCopies()
+        {
+            var path = Path.Combine(_tempRoot, "previous-workbench");
+            Directory.CreateDirectory(Path.Combine(path, "references"));
+            Assert.That(SkillInstaller.CompareInstalledCopy("2.9.1", path),
+                Is.EqualTo(SkillInstaller.InstalledVersionState.Newer));
+
+            File.WriteAllText(Path.Combine(path, "EDITOR.md"), "Workbench protocol");
+            File.WriteAllText(Path.Combine(path, "references", "workflows.md"), "Workbench catalog");
+            Assert.That(SkillInstaller.CompareInstalledCopy("2.9.1", path),
+                Is.EqualTo(SkillInstaller.InstalledVersionState.Older));
+            Assert.That(SkillInstaller.CompareInstalledCopy("0.0.2", path),
+                Is.EqualTo(SkillInstaller.InstalledVersionState.Newer));
+        }
+
+        [Test]
         public void SyncTargets_SkipsTargetWithNewerInstalledVersion()
         {
             var path = Path.Combine(_tempRoot, "newer");

@@ -37,6 +37,8 @@ namespace UnitySkills
             {
                 return ResolveSkillNotFound(name);
             }
+            if (SkillsSurfaceProfile.IsDisabledByUser(name, skill.Category))
+                return ApplySurfaceGate(skill, name);
 
             bool autoStartedWorkflow = false;
             // The persistence cost of EndTask() on the auto-workflow path, attached to the success envelope as workflowEndMs.

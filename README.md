@@ -1,6 +1,8 @@
 # Unity Skills Workbench
 
-Dự án Unity 6 cung cấp **một skill duy nhất, `$unity-skills`**, kết hợp hướng dẫn chính thức của Unity với công cụ thao tác trực tiếp trong Editor của Besty. [Danh mục quy trình hợp nhất](unity-skills/references/workflows.md) gom các chức năng giao nhau như UI Toolkit, uGUI, CLI, UPM, NavMesh, vật lý, hậu kỳ và Shader Graph. Các chức năng riêng vẫn có tài liệu bên trong skill.
+Phiên bản Workbench **0.0.1**.
+
+Dự án Unity 6 cung cấp **một skill duy nhất, `$unity-skills`**, kết hợp hướng dẫn chính thức của Unity, các mẫu Unity 6.3 của Nice Wolf Studio và công cụ thao tác trực tiếp trong Editor của Besty. [Danh mục quy trình hợp nhất](unity-skills/references/workflows.md) bao gồm review C#, gameplay, Input System, ECS/DOTS, UI, CLI, vật lý, đồ họa và các nhóm tác vụ khác.
 
 ## Bắt đầu
 
@@ -36,7 +38,15 @@ https://github.com/quocbr/UnitySkills.git?path=/upstream/besty-unity-skills/Skil
 
 Mở **Window → UnitySkills → AI Config → Codex**, chọn **Cài đặt (Project)** hoặc **Cài đặt (Global)**. Gói đi kèm đúng mẫu `$unity-skills` hợp nhất và giao diện tiếng Việt. Bật **Khởi động Server** khi cần làm việc trực tiếp với Editor. Nếu đã cài skill hợp nhất ở chế độ Global, mở project trong Codex để sử dụng.
 
-Cập nhật gói Git qua **Package Manager** để tiếp tục nhận đúng bản Workbench. Nếu đã tải repo về máy, cũng có thể chọn **Install package from disk** và trỏ đến [package.json](upstream/besty-unity-skills/SkillsForUnity/package.json).
+Cập nhật bằng cách dán lại cùng URL vào **Install package from Git URL**. Đổi `#main` thành `#v0.0.1` nếu muốn ghim đúng phiên bản này. Nếu đã tải repo về máy, có thể chọn **Install package from disk** và trỏ đến [package.json](upstream/besty-unity-skills/SkillsForUnity/package.json).
+
+Sau khi cập nhật gói, dùng **AI Config → Cập nhật (Project)** hoặc **Cập nhật (Global)** cho agent đang dùng để nhận nội dung skill mới. Khi cài từ workspace bằng Python, thêm `--migrate` để sao lưu bản Workbench cũ trước khi thay thế.
+
+## Bật hoặc tắt skill
+
+Trong **Window → UnitySkills → Skills**, bỏ dấu chọn cạnh tên một skill hoặc cạnh tiêu đề nhóm để tắt. Chọn lại để bật. Lựa chọn được lưu riêng cho từng project. Khi bật lại một nhóm, trạng thái riêng của từng skill trong nhóm vẫn được áp dụng.
+
+Các skill REST đã tắt bị ẩn khỏi danh mục API và bị chặn nếu agent gọi theo tên. Chế độ quyền của UnitySkills vẫn áp dụng cho các skill đang bật.
 
 ## Mã nguồn và giấy phép
 
@@ -44,5 +54,6 @@ Cập nhật gói Git qua **Package Manager** để tiếp tục nhận đúng b
 | --- | --- | --- |
 | [Skills chính thức](upstream/unity-technologies-skills/skills) | [`ba28c24`](https://github.com/Unity-Technologies/skills/tree/ba28c24fc7e569fa0fd5b6bf16ab2bb0acef0594) | [Unity Companion License](upstream/unity-technologies-skills/LICENSE.md) |
 | [Gói Besty và Python client](upstream/besty-unity-skills/SkillsForUnity) | [`a2d4135`](https://github.com/Besty0728/Unity-Skills/tree/a2d413571ea32084fa17a56ba9c9341831df4f4c), v2.9.1 | [MIT](upstream/besty-unity-skills/LICENSE) |
+| [Hướng dẫn Nice Wolf Studio](unity-skills/references/nice-wolf-studio) | [`a149d3e`](https://github.com/Nice-Wolf-Studio/unity-claude-skills/tree/a149d3e995420432f52b0899092daa4b069f441f) | [MIT](upstream/nice-wolf-studio-unity-claude-skills/LICENSE) |
 
-Mẫu `unity-skills/` giữ cả hai giấy phép. Unity Companion License áp dụng cho phần của Unity Technologies khi dùng với dự án phụ thuộc Unity. [Điều khoản Unity Companion License](https://unity.com/legal/licenses/unity-companion-license).
+Mẫu `unity-skills/` giữ thông báo bản quyền và giấy phép của cả ba nguồn. Tài liệu Nice Wolf Studio được mở theo chủ đề từ Workbench. Phần Unity Ops được tích hợp ở mức hướng dẫn chẩn đoán CLI, còn quyền thực thi tiếp tục do Workbench và agent kiểm soát. Unity Companion License áp dụng cho phần của Unity Technologies khi dùng với dự án phụ thuộc Unity. [Điều khoản Unity Companion License](https://unity.com/legal/licenses/unity-companion-license).

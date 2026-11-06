@@ -2,6 +2,17 @@
 
 All notable changes to **UnitySkills** will be documented in this file.
 
+## [0.0.1] - 2026-11-06
+
+### Added
+
+- **Nice Wolf Studio** — 37 Unity 6.3 and CLI guides integrated into the unified Workbench skill.
+- **Skill controls** — enable or disable individual Editor skills and categories from the Skills tab. Settings are saved per project and enforced by discovery and execution.
+
+### Changed
+
+- **Workbench version** — the Unity package, runtime and Python client use `0.0.1`. AI Config can migrate the previous Workbench template that used the upstream `2.9.1` version.
+
 ## [2.9.1] - 2026-10-17
 
 > **直接编辑预制体资产 + 运行时方法调用与场景验证 + 持续保存的 Console 日志** —— (1) **预制体资产编辑**：29 个新技能不实例化到场景就能查询和修改 `.prefab` 里的节点、组件、序列化属性与引用；单资产多步操作全部成功才保存，支持原生 Undo 与 Workflow 恢复，保留变体与嵌套预制体连接。(2) **运行时验证**：发现并调用组件或静态 C# 方法，`editor_run_scenario` 把"调用 → 等待 → 断言"组合成一次验证作业，配套 Python 辅助脚本串起编译验证与有界修复。(3) **Console 日志历史**：日志持续收集并持久化，带 UTC 时间、固定快照分页、重复分组与时间窗口。(4) **更稳**：编译结果绑定到具体编译周期，所有 GET 请求统一在主线程处理，Python 客户端轮询作业时锁定原 Editor、不重放结果不明的写操作。(5) 新增赞助商 **Mirasim**。技能 805 → 839（+34），不删除任何技能或参数。

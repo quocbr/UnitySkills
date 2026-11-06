@@ -31,6 +31,7 @@ namespace UnitySkills
         {
             public bool IsCategory;
             public string CategoryName;
+            public SkillCategory Category;
             public int SkillCount;
             public UnitySkillsWindow.SkillInfo Skill;
             public string FoldKey;
@@ -190,6 +191,7 @@ namespace UnitySkills
                 {
                     IsCategory = true,
                     CategoryName = kvp.Key,
+                    Category = filtered[0].Category,
                     SkillCount = filtered.Count,
                     FoldKey = foldKey,
                 });
@@ -252,6 +254,11 @@ namespace UnitySkills
             var countLabel = new Label { name = "category-count" };
             countLabel.AddToClassList("cat-count");
             header.Add(countLabel);
+            header.Add(MakeEnableToggle("category-enable", enabled =>
+            {
+                if (header.userData is SkillsListItem category)
+                    SkillsSurfaceProfile.SetCategoryDisabled(category.Category, !enabled);
+            }));
             item.Add(header);
 
             var row = new VisualElement { name = "skills-list-skill" };
@@ -269,9 +276,23 @@ namespace UnitySkills
             var badge = new Label { name = "skill-risk-badge" };
             badge.AddToClassList("risk-badge");
             row.Add(badge);
+            row.Add(MakeEnableToggle("skill-enable", enabled =>
+            {
+                if (row.userData is SkillsListItem entry)
+                    SkillsSurfaceProfile.SetSkillDisabled(entry.Skill.Name, !enabled);
+            }));
             item.Add(row);
 
             return item;
+        }
+
+        private static Toggle MakeEnableToggle(string name, Action<bool> setEnabled)
+        {
+            var toggle = new Toggle { name = name };
+            toggle.AddToClassList("skills-enable-toggle");
+            toggle.RegisterCallback<ClickEvent>(evt => evt.StopPropagation());
+            toggle.RegisterValueChangedCallback(evt => setEnabled(evt.newValue));
+            return toggle;
         }
 
         private void BindSkillsListItem(VisualElement element, int index)
@@ -298,6 +319,9 @@ namespace UnitySkills
                 if (chevron != null) chevron.text = expanded ? "▼" : "▶";
                 if (nameLabel != null) nameLabel.text = listItem.CategoryName;
                 if (countLabel != null) countLabel.text = listItem.SkillCount.ToString();
+                var toggle = header.Q<Toggle>("category-enable");
+                toggle.tooltip = SkillsLocalization.Get("skills_toggle_category");
+                toggle.SetValueWithoutNotify(!SkillsSurfaceProfile.IsCategoryDisabled(listItem.Category));
                 return;
             }
 
@@ -312,6 +336,10 @@ namespace UnitySkills
                 badge.text = highRisk ? SkillsLocalization.Get("skills_tag_danger") : "";
                 badge.SetVisible(highRisk);
             }
+            var skillToggle = row.Q<Toggle>("skill-enable");
+            skillToggle.tooltip = SkillsLocalization.Get("skills_toggle_skill");
+            skillToggle.SetValueWithoutNotify(!SkillsSurfaceProfile.IsSkillDisabled(skill.Name));
+            skillToggle.SetEnabled(!SkillsSurfaceProfile.IsCategoryDisabled(skill.Category));
             row.EnableInClassList("selected", skill.Name == _selectedSkillName);
         }
 
@@ -346,7 +374,11 @@ namespace UnitySkills
         /// us — currently a surface-profile switch, which adds or removes whole modules at once.
         /// The window rebuilds its catalog first, then calls this.
         /// </summary>
-        public void RefreshCatalog() => RebuildList();
+        public void RefreshCatalog()
+        {
+            RebuildList();
+            UpdateSkillActions(FindSkill(_selectedSkillName));
+        }
 
         /// <summary>External API — called by main window for SelectTestSkill.</summary>
         public void SelectSkillByName(string skillName, string defaultParams)
@@ -362,7 +394,7 @@ namespace UnitySkills
         private UnitySkillsWindow.SkillInfo FindSkill(string name)
         {
             var dict = _window.SkillsByCategory;
-            if (dict == null) return null;
+            if (dict == null || string.IsNullOrEmpty(name)) return null;
             foreach (var list in dict.Values)
             foreach (var s in list)
                 if (s.Name == name) return s;
@@ -380,12 +412,18 @@ namespace UnitySkills
             if (_paramsField != null) _paramsField.value = defaultParams ?? "{}";
             if (_resultField != null) _resultField.value = "";
             ClearResultError();
+            UpdateSkillActions(skill);
+        }
 
-            if (_dryRunBtn != null)
-            {
-                var attr = skill.Method?.GetCustomAttribute<UnitySkillAttribute>();
-                _dryRunBtn.SetEnabled(attr == null || attr.SupportsDryRun);
-            }
+        private void UpdateSkillActions(UnitySkillsWindow.SkillInfo skill)
+        {
+            if (skill == null) return;
+            bool disabled = SkillsSurfaceProfile.IsDisabledByUser(skill.Name, skill.Category);
+            var attr = skill.Method?.GetCustomAttribute<UnitySkillAttribute>();
+            _execBtn?.SetEnabled(!disabled);
+            _dryRunBtn?.SetEnabled(!disabled && (attr == null || attr.SupportsDryRun));
+            if (_execBtn != null)
+                _execBtn.tooltip = disabled ? SkillsLocalization.Get("skills_disabled_by_user") : null;
         }
 
         /// <summary>
@@ -493,7 +531,11 @@ namespace UnitySkills
             if (!string.IsNullOrEmpty(_selectedSkillName))
             {
                 var skill = FindSkill(_selectedSkillName);
-                if (skill != null) RelocalizeDetail(skill);
+                if (skill != null)
+                {
+                    RelocalizeDetail(skill);
+                    UpdateSkillActions(skill);
+                }
             }
         }
 

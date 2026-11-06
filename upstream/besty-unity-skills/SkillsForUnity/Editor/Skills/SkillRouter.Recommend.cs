@@ -762,7 +762,7 @@ namespace UnitySkills
         /// so a trimmed result is indistinguishable from an empty one -- without this hint, an agent would conclude the operation is impossible and tell the user so,
         /// when in fact the user hid it, and can also un-hide it.
         /// </summary>
-        private const string SurfaceProfilePrunedHint = "Results were pruned by the user's surface profile — a skill missing here may exist but be hidden, so do not conclude Unity cannot do it. GET /health for the active profile; only the user can switch it back to \"full\" in the UnitySkills panel.";
+        private const string SurfaceProfilePrunedHint = "The user's surface profile or disabled skills and groups filtered these results. Missing skills may still exist. The user can change these controls in the UnitySkills panel.";
 
         internal static string[] FormatOperationForPlanning(SkillOperation op)
         {

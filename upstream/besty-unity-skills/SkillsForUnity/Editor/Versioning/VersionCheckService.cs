@@ -77,7 +77,7 @@ namespace UnitySkills
         }
 
         internal static bool HasUpdate =>
-            NotificationsEnabled && ShouldShowUpdate(
+            !SkillInstaller.IsWorkbenchPackage && NotificationsEnabled && ShouldShowUpdate(
                 SkillsLogger.Version,
                 _latestRelease?.Version,
                 EditorPrefs.GetString(PrefDismissedVersion, string.Empty));
@@ -90,6 +90,7 @@ namespace UnitySkills
 
         internal static void StartCheck(bool force = false)
         {
+            if (SkillInstaller.IsWorkbenchPackage) return;
             if (!force && !NotificationsEnabled) return;
             if (_activeRequest != null) return;
 

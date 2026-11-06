@@ -44,6 +44,9 @@ namespace UnitySkills
         /// </summary>
         private static string BuildSurfaceExclusionHint(SkillInfo skill, bool forPreview)
         {
+            if (SkillsSurfaceProfile.IsDisabledByUser(skill.Name, skill.Category))
+                return "Disabled in UnitySkills > Skills. Only the user can enable the skill or its group. Stop this operation until then.";
+
             var profile = SkillsSurfaceProfile.CurrentWire;
 
             if (SkillsSurfaceProfile.IsAlwaysHiddenSkill(skill.Name))
@@ -82,6 +85,16 @@ namespace UnitySkills
 
             var profile = SkillsSurfaceProfile.CurrentWire;
             var category = skill.Category.ToString();
+            if (SkillsSurfaceProfile.IsDisabledByUser(skill.Name, skill.Category))
+            {
+                SkillsAuditLog.Append("call", new { skill = name, result = "surfaceExcluded", category, disabledByUser = true });
+                return SkillErrorResponse.Build(SkillErrorCode.SurfaceExcluded,
+                    $"Skill '{name}' or its {category} group is disabled in UnitySkills > Skills.",
+                    skill: name,
+                    details: new { category, disabledByUser = true, userControlled = true,
+                        hint = BuildSurfaceExclusionHint(skill, forPreview: false) },
+                    retryStrategy: SkillErrorResponse.Abort);
+            }
             var manualDoc = SurfaceExclusionManualDoc(skill);
             var hint = BuildSurfaceExclusionHint(skill, forPreview: false);
 

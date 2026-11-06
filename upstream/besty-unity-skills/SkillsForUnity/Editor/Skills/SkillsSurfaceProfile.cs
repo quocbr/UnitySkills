@@ -1,6 +1,8 @@
 ﻿using System;
 using System.Collections.Generic;
 using UnityEditor;
+using UnityEngine;
+using Newtonsoft.Json;
 
 namespace UnitySkills
 {
@@ -52,6 +54,42 @@ namespace UnitySkills
         private const string PrefKeyProfile = "UnitySkills_SurfaceProfile";
         // The pre-2.7 boolean guide toggle, read only for the one-way migration (see Load).
         private const string PrefKeyLegacyGuideMode = "UnitySkills_GuideMode";
+        private static readonly string DisabledPrefsPrefix =
+            "UnitySkills_Disabled_" + Hash128.Compute(Application.dataPath) + "_";
+        private static HashSet<string> _disabledSkills;
+        private static HashSet<string> _disabledCategories;
+
+        private static HashSet<string> DisabledSkills => _disabledSkills ??= LoadDisabled("Skills");
+        private static HashSet<string> DisabledCategories => _disabledCategories ??= LoadDisabled("Categories");
+
+        private static HashSet<string> LoadDisabled(string suffix)
+        {
+            try
+            {
+                var names = JsonConvert.DeserializeObject<string[]>(EditorPrefs.GetString(DisabledPrefsPrefix + suffix, "[]"));
+                return new HashSet<string>(names ?? Array.Empty<string>(), StringComparer.OrdinalIgnoreCase);
+            }
+            catch (JsonException)
+            {
+                return new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            }
+        }
+
+        private static void SetDisabled(HashSet<string> entries, string suffix, string name, bool disabled)
+        {
+            if (!(disabled ? entries.Add(name) : entries.Remove(name))) return;
+            EditorPrefs.SetString(DisabledPrefsPrefix + suffix, JsonConvert.SerializeObject(entries));
+            RaiseChanged();
+        }
+
+        internal static bool IsSkillDisabled(string name) => DisabledSkills.Contains(name);
+        internal static bool IsCategoryDisabled(SkillCategory category) => DisabledCategories.Contains(category.ToString());
+        internal static bool IsDisabledByUser(string name, SkillCategory category) =>
+            IsSkillDisabled(name) || IsCategoryDisabled(category);
+
+        internal static void SetSkillDisabled(string name, bool disabled) => SetDisabled(DisabledSkills, "Skills", name, disabled);
+        internal static void SetCategoryDisabled(SkillCategory category, bool disabled) =>
+            SetDisabled(DisabledCategories, "Categories", category.ToString(), disabled);
 
         /// <summary>
         /// Fires after the profile has changed and been persisted. Subscribers must assume the
@@ -90,7 +128,7 @@ namespace UnitySkills
         /// per-skill filtering entirely, so the default profile only costs one comparison per
         /// surface instead of one per skill.
         /// </summary>
-        public static bool IsFull => Current == SurfaceProfileKind.Full;
+        public static bool IsFull => Current == SurfaceProfileKind.Full && DisabledSkills.Count == 0 && DisabledCategories.Count == 0;
 
         /// <summary>
         /// The set of categories whose write skills a given profile hides.
@@ -120,7 +158,7 @@ namespace UnitySkills
         /// </summary>
         public static bool IsExcluded(SkillCategory category, bool readOnly)
         {
-            return IsExcludedCore(Current, null, category, readOnly, mutatesScene: false);
+            return IsCategoryDisabled(category) || IsExcludedCore(Current, null, category, readOnly, mutatesScene: false);
         }
 
         /// <summary>
@@ -130,8 +168,11 @@ namespace UnitySkills
         internal static bool IsExcluded(SkillRouter.SkillInfo skill)
         {
             if (skill == null) return false;
-            return IsExcludedCore(Current, skill.Name, skill.Category, skill.ReadOnly, skill.MutatesScene);
+            return IsDisabledByUser(skill.Name, skill.Category) || IsExcludedByProfile(skill);
         }
+
+        internal static bool IsExcludedByProfile(SkillRouter.SkillInfo skill) =>
+            IsExcludedCore(Current, skill.Name, skill.Category, skill.ReadOnly, skill.MutatesScene);
 
         /// <summary>
         /// Rule order, and why each one exists:
@@ -228,7 +269,7 @@ namespace UnitySkills
         /// <c>MutatesScene</c> declaration.
         /// </summary>
         internal static bool WithdrawsWriteIn(SkillCategory category) =>
-            IsExcludedCore(Current, null, category, readOnly: false, mutatesScene: false);
+            IsExcluded(category, readOnly: false);
 
         /// <summary>
         /// The rejection object returned when a call's about-to-be-applied write operation is
@@ -251,10 +292,12 @@ namespace UnitySkills
             string skillName, SkillCategory category, string subject, string operation)
         {
             var manualDoc = ManualDocFor(category);
+            bool disabled = IsCategoryDisabled(category);
             return new
             {
                 success = false,
-                error = $"Skill '{skillName}' is withdrawn by the current surface profile " +
+                error = disabled ? $"Skill '{skillName}' cannot apply this payload because the {category} group is disabled in UnitySkills > Skills."
+                    : $"Skill '{skillName}' is withdrawn by the current surface profile " +
                         $"'{CurrentWire}': {subject} writes the {category} category, which this profile hides.",
                 errorCode = SkillErrorCode.SurfaceExcluded.ToWireString(),
                 retryStrategy = SkillErrorResponse.Abort,
@@ -263,7 +306,7 @@ namespace UnitySkills
                 operation,
                 manualDoc,
                 userControlled = true,
-                hint = CarriedWriteHint(manualDoc),
+                hint = CarriedWriteHint(manualDoc, category),
             };
         }
 
@@ -286,7 +329,7 @@ namespace UnitySkills
                 surfaceProfile = CurrentWire,
                 category = category.ToString(),
                 manualDoc,
-                hint = CarriedWriteHint(manualDoc),
+                hint = CarriedWriteHint(manualDoc, category),
             };
         }
 
@@ -352,7 +395,7 @@ namespace UnitySkills
                 payloadGatedCategories = withdrawn.ToArray(),
                 payloadGateHint =
                     $"Skill-level verdict only — this entry point applies whatever its payload carries, so the " +
-                    $"\"{CurrentWire}\" profile is enforced at execute time against the classified payload, not against " +
+                    $"surface profile and disabled groups are enforced at execute time against the classified payload, not against " +
                     $"this skill's metadata. A payload writing {categoryList} is refused with " +
                     $"{SkillErrorCode.SurfaceExcluded.ToWireString()} even though allowed is true here. Check the payload " +
                     $"before executing: a batch preview carries a \"surfaceExclusion\" block when the kind its token was " +
@@ -368,8 +411,10 @@ namespace UnitySkills
         /// "try a different route" — unlike a hidden skill, this entry point is visible, which
         /// naturally invites trying a fresh token again.
         /// </summary>
-        private static string CarriedWriteHint(string manualDoc)
+        private static string CarriedWriteHint(string manualDoc, SkillCategory category)
         {
+            if (IsCategoryDisabled(category))
+                return "The user can enable this group in UnitySkills > Skills. Stop this operation until then.";
             return manualDoc != null
                 ? $"Do not retry and do not look for another route — previewing and planning stay open, applying does not. Read {manualDoc} and walk the user through the change in the Editor yourself, or ask them to switch the surface profile back to \"full\" in the UnitySkills panel if they want it automated."
                 : $"Do not retry and do not look for another route. The \"{CurrentWire}\" profile excludes scene-authoring writes; tell the user this step needs one and let them switch the surface profile back to \"full\" in the UnitySkills panel.";

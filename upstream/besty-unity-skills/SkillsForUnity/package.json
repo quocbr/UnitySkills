@@ -1,11 +1,11 @@
 {
   "name": "com.besty.unity-skills",
-  "version": "2.9.1",
+  "version": "0.0.1",
   "displayName": "UnitySkills Workbench",
   "description": "Unified Unity agent skills with Besty's Editor automation and Vietnamese UI localization.",
   "unity": "2022.3",
   "documentationUrl": "https://github.com/quocbr/UnitySkills#readme",
-  "changelogUrl": "https://github.com/Besty0728/Unity-Skills/blob/main/CHANGELOG.md",
+  "changelogUrl": "https://github.com/quocbr/UnitySkills/blob/main/upstream/besty-unity-skills/CHANGELOG.md",
   "licensesUrl": "https://github.com/Besty0728/Unity-Skills/blob/main/LICENSE",
   "dependencies": {
     "com.unity.nuget.newtonsoft-json": "3.0.2",

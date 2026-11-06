@@ -3,6 +3,7 @@
 
 import os
 import re
+from hashlib import sha256
 from pathlib import Path
 from shutil import copyfile
 from urllib.parse import unquote
@@ -13,16 +14,21 @@ ROOT = Path(__file__).resolve().parents[1]
 TEMPLATE = ROOT / "unity-skills"
 OFFICIAL = ROOT / "upstream" / "unity-technologies-skills"
 BESTY = ROOT / "upstream" / "besty-unity-skills"
+NICE_WOLF = ROOT / "upstream" / "nice-wolf-studio-unity-claude-skills"
 BESTY_TEMPLATE = BESTY / "SkillsForUnity" / "unity-skills~"
 PACKAGE_ARCHIVE = BESTY_TEMPLATE.with_name("workbench-skill~") / "template.zip"
+REVISION = "workbench-revision.txt"
 LINK = re.compile(r"(\]\()([^\s)#]+)(?=[)#\s])")
 
 
 def refresh():
     copies = {}
+    nice_wolf_reference = TEMPLATE / "references" / "nice-wolf-studio"
     for source_root, destination_root in (
         (BESTY_TEMPLATE, TEMPLATE),
         (OFFICIAL / "skills", TEMPLATE / "references" / "unity-technologies"),
+        (NICE_WOLF / "skills", nice_wolf_reference),
+        (NICE_WOLF / "unity-ops" / "skills", nice_wolf_reference),
     ):
         for source in source_root.rglob("*"):
             if not source.is_file() or "__pycache__" in source.parts or source.name == "agent_config.json":
@@ -36,6 +42,7 @@ def refresh():
 
     copies[BESTY / "LICENSE"] = TEMPLATE / "LICENSE"
     copies[OFFICIAL / "LICENSE.md"] = TEMPLATE / "references" / "unity-technologies" / "LICENSE.md"
+    copies[NICE_WOLF / "LICENSE"] = nice_wolf_reference / "LICENSE"
 
     for source, destination in copies.items():
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -57,12 +64,19 @@ def refresh():
         destination.write_bytes(LINK.sub(link_to_reference, text).encode("utf-8"))
 
     PACKAGE_ARCHIVE.parent.mkdir(parents=True, exist_ok=True)
+    revision = sha256()
     with ZipFile(PACKAGE_ARCHIVE, "w") as archive:
-        for source in sorted(TEMPLATE.rglob("*")):
-            if not source.is_file() or "__pycache__" in source.parts or source.name == "agent_config.json":
+        for source in sorted(TEMPLATE.rglob("*"), key=lambda path: path.relative_to(TEMPLATE).as_posix()):
+            if not source.is_file() or "__pycache__" in source.parts or source.name in ("agent_config.json", REVISION):
                 continue
-            entry = ZipInfo(source.relative_to(TEMPLATE).as_posix())
-            archive.writestr(entry, source.read_bytes(), compress_type=ZIP_DEFLATED)
+            name = source.relative_to(TEMPLATE).as_posix()
+            content = source.read_bytes()
+            revision.update(name.encode("utf-8") + b"\0" + sha256(content).digest())
+            archive.writestr(ZipInfo(name), content, compress_type=ZIP_DEFLATED)
+
+        revision_text = revision.hexdigest() + "\n"
+        archive.writestr(ZipInfo(REVISION), revision_text, compress_type=ZIP_DEFLATED)
+    (TEMPLATE / REVISION).write_bytes(revision_text.encode("ascii"))
 
 
 if __name__ == "__main__":

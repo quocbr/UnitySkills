@@ -77,6 +77,7 @@ namespace UnitySkills
             public string Name;
             public string Description;
             public MethodInfo Method;
+            public SkillCategory Category;
         }
         private Dictionary<string, List<SkillInfo>> _skillsByCategory;
         public Dictionary<string, List<SkillInfo>> SkillsByCategory => _skillsByCategory;
@@ -573,16 +574,12 @@ namespace UnitySkills
         {
             _skillsByCategory = new Dictionary<string, List<SkillInfo>>();
 
-            // Must go through the router's PROFILE-FILTERED snapshot, not a raw TypeCache sweep.
-            // The surface profile is the user's statement about which skills may be offered at all;
-            // enumerating types directly ignores it, so under the guide profile the panel would
-            // still list gameobject_create, let the user select it and press Run, and answer with a
-            // SURFACE_EXCLUDED rejection whose wording is addressed to an AI agent. Same source and
-            // same reasoning as AllowlistPickerWindow.
+            // Keep the profile filter, but show manually disabled rows here so the user can enable them.
             SkillRouter.SkillInfo[] snapshot;
             try
             {
-                snapshot = SkillRouter.GetAllSkillsSnapshot();
+                snapshot = SkillRouter.GetAllSkillsSnapshotUnfiltered()
+                    .Where(skill => !SkillsSurfaceProfile.IsExcludedByProfile(skill)).ToArray();
             }
             catch (Exception ex)
             {
@@ -606,7 +603,8 @@ namespace UnitySkills
                 {
                     Name = skill.Name,
                     Description = skill.Description ?? "",
-                    Method = skill.Method
+                    Method = skill.Method,
+                    Category = skill.Category
                 });
             }
         }

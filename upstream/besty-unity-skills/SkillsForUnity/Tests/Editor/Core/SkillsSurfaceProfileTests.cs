@@ -92,6 +92,46 @@ namespace UnitySkills.Tests.Core
 
         // ---------- visible-set derivation ----------
 
+        [Test]
+        public void UserToggles_FilterDiscoveryAndRejectReadsEvenInBypass()
+        {
+            const string skill = "camera_list";
+            const string sibling = "camera_get_properties";
+            const string otherGroup = "scene_get_info";
+            const SkillCategory category = SkillCategory.Camera;
+            var wasSkillDisabled = SkillsSurfaceProfile.IsSkillDisabled(skill);
+            var wasCategoryDisabled = SkillsSurfaceProfile.IsCategoryDisabled(category);
+            try
+            {
+                SkillsSurfaceProfile.SetCategoryDisabled(category, false);
+                SkillsSurfaceProfile.SetSkillDisabled(skill, false);
+                Assert.That(SkillRouter.GetFilteredSchema("names=" + skill), Does.Contain(skill));
+
+                SkillsSurfaceProfile.SetSkillDisabled(skill, true);
+                var disabled = JObject.Parse(SkillRouter.Execute(skill, "{}"));
+                Assert.That(disabled["errorCode"]?.Value<string>(), Is.EqualTo("SURFACE_EXCLUDED"));
+                Assert.That(disabled["details"]?["disabledByUser"]?.Value<bool>(), Is.True);
+                Assert.That(SkillRouter.GetAllSkillsSnapshot().Select(entry => entry.Name), Does.Contain(sibling));
+
+                SkillsSurfaceProfile.SetCategoryDisabled(category, true);
+                var names = SkillRouter.GetAllSkillsSnapshot().Select(entry => entry.Name);
+                Assert.That(names, Does.Not.Contain(sibling));
+                Assert.That(names, Does.Contain(otherGroup));
+                Assert.That(JObject.Parse(SkillRouter.Execute(sibling, "{}"))["errorCode"]?.Value<string>(),
+                    Is.EqualTo("SURFACE_EXCLUDED"));
+
+                SkillsSurfaceProfile.SetCategoryDisabled(category, false);
+                Assert.That(SkillRouter.GetAllSkillsSnapshot().Select(entry => entry.Name), Does.Not.Contain(skill));
+                SkillsSurfaceProfile.SetSkillDisabled(skill, false);
+                Assert.That(SkillRouter.GetAllSkillsSnapshot().Select(entry => entry.Name), Does.Contain(skill));
+            }
+            finally
+            {
+                SkillsSurfaceProfile.SetSkillDisabled(skill, wasSkillDisabled);
+                SkillsSurfaceProfile.SetCategoryDisabled(category, wasCategoryDisabled);
+            }
+        }
+
         [TestCase(SurfaceProfileKind.Full)]
         [TestCase(SurfaceProfileKind.Guide)]
         [TestCase(SurfaceProfileKind.NoSceneAuthoring)]

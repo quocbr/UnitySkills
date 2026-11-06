@@ -337,14 +337,13 @@ namespace UnitySkills
         }
 
         /// <summary>
-        /// Same rule as the post-upgrade auto-sync: a copy already at this package version or newer (e.g. refreshed
-        /// by another project on a newer package) is left alone. Returns true when the install should be skipped;
-        /// forcing a reinstall means Uninstall first. Only consulted when a copy is already present.
+        /// Skip copies on newer packages or on the same package and Workbench template revision.
+        /// Consulted only when the user explicitly updates an installed copy.
         /// </summary>
         private static bool ShowSkipIfInstalledCopyIsCurrentOrNewer(string targetPath)
         {
             var installedVersion = SkillInstaller.ReadInstalledVersion(targetPath);
-            switch (SkillInstaller.CompareInstalledVersion(installedVersion, SkillsLogger.Version))
+            switch (SkillInstaller.CompareInstalledCopy(installedVersion, targetPath))
             {
                 case SkillInstaller.InstalledVersionState.Current:
                     EditorUtility.DisplayDialog(SkillsLocalization.Get("dialog_info"),
