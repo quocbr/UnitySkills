@@ -351,7 +351,7 @@ namespace UnitySkills.Tests.Core
 
             var report = SkillInstallSyncService.SyncTargets(new[]
             {
-                Make("Older", olderPath, () => "0.0.1"),
+                Make("Older", olderPath, () => "0.0.0"),
                 Make("Unknown", unknownPath, () => null)
             });
 

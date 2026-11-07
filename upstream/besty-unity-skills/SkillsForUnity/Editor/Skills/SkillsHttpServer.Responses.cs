@@ -42,7 +42,6 @@ namespace UnitySkills
                 response = context.Response;
                 response.Headers.Add("Access-Control-Allow-Methods", CorsAllowMethods);
                 response.Headers.Add("Access-Control-Allow-Headers", CorsAllowHeaders);
-                response.Headers.Add("Access-Control-Allow-Origin", "*");
                 response.Headers.Add("X-Request-Id", $"req_{Interlocked.Increment(ref _requestIdCounter):X8}");
                 response.Headers.Add("X-Agent-Id", DetectAgent(request));
                 AddInstanceHeaders(response);
@@ -80,7 +79,6 @@ namespace UnitySkills
                 response = context.Response;
                 response.Headers.Add("Access-Control-Allow-Methods", CorsAllowMethods);
                 response.Headers.Add("Access-Control-Allow-Headers", CorsAllowHeaders);
-                response.Headers.Add("Access-Control-Allow-Origin", "*");
                 response.Headers.Add("X-Request-Id", $"req_{Interlocked.Increment(ref _requestIdCounter):X8}");
                 response.Headers.Add("X-Agent-Id", DetectAgent(request));
                 AddInstanceHeaders(response);

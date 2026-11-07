@@ -418,6 +418,15 @@ namespace UnitySkills.Tests.Core
                 ["skill"] = "gameobject_create",
                 ["token"] = restricted["details"]?["grantRequestToken"]?.ToString(),
             }.ToString(Formatting.None));
+            Assert.That(grant["errorCode"]?.ToString(), Is.EqualTo("GRANT_PENDING_APPROVAL"), grant.ToString(Formatting.None));
+
+            var grantRequestToken = restricted["details"]?["grantRequestToken"]?.ToString();
+            Assert.That(SkillsModeManager.Approve(grantRequestToken), Is.True);
+            grant = DryRunPolicyTestHarness.Post("/permission/grant", "", new JObject
+            {
+                ["skill"] = "gameobject_create",
+                ["token"] = grantRequestToken,
+            }.ToString(Formatting.None));
             Assert.That(grant["executed"]?.Value<bool>(), Is.True, grant.ToString(Formatting.None));
             Assert.That(grant["result"]?["status"]?.ToString(), Is.EqualTo("success"), grant.ToString(Formatting.None));
             Assert.That(DryRunPolicyTestHarness.Exists("ApprovalProbe"), Is.True);

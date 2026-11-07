@@ -56,7 +56,8 @@ namespace UnitySkills
     ///   the new key <c>UnitySkills_AllowlistSkills</c>; the migration is idempotent.
     ///
     /// State storage:
-    /// - <c>CurrentMode</c> / <c>PanelApprovalRequired</c> / <c>AllowlistSkills</c>: EditorPrefs (per machine)
+    /// - <c>CurrentMode</c> / <c>AllowlistSkills</c>: EditorPrefs (per machine)
+    /// - <c>PanelApprovalRequired</c>: always true; the legacy preference is kept for compatibility
     /// - Pending grant tokens: in-memory only (TTL 5 minutes, at most 256 live)
     /// - One-shot bypass marker: in-memory ThreadStatic only
     ///
@@ -181,16 +182,15 @@ namespace UnitySkills
         }
 
         /// <summary>
-        /// When true (Approval mode only), an AI-initiated authorization request must first be approved on the
-        /// Unity panel before <see cref="TryGrant"/> can succeed. Defaults to false, i.e. the Dialog channel
-        /// (the AI calls grant directly after obtaining the user's consent in conversation).
+        /// Authorization requests always require a decision in the Unity panel.
+        /// The former Dialog channel could not authenticate conversational consent.
         /// </summary>
         public static bool PanelApprovalRequired
         {
-            get => EditorPrefs.GetBool(PrefKeyPanelApproval, false);
+            get => true;
             set
             {
-                EditorPrefs.SetBool(PrefKeyPanelApproval, value);
+                EditorPrefs.SetBool(PrefKeyPanelApproval, true);
                 RaiseChanged();
             }
         }
@@ -313,7 +313,9 @@ namespace UnitySkills
             CleanupExpired();
             EnforceCapacity();
 
-            var channel = PanelApprovalRequired ? ApprovalChannel.Panel : ApprovalChannel.Dialog;
+            // A token returned to an HTTP caller is not proof of user consent.
+            // Always require a decision made inside the Editor panel.
+            var channel = ApprovalChannel.Panel;
             var nowUtc = DateTime.UtcNow;
             var entry = new GrantEntry
             {

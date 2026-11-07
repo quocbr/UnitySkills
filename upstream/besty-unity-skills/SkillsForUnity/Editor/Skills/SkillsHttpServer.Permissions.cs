@@ -41,6 +41,21 @@ namespace UnitySkills
 
             if (job.HttpMethod == "POST")
             {
+                // Permission preferences and panel decisions are owned by the Unity UI.
+                // Exposing them over the unauthenticated loopback API lets any caller
+                // allowlist a high-risk skill or approve its own grant token.
+                if (string.Equals(path, "/permission/approve", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(path, "/permission/deny", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(path, "/permission/allowlist/add", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(path, "/permission/allowlist/remove", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(path, "/permission/revoke", StringComparison.OrdinalIgnoreCase))
+                {
+                    job.StatusCode = 403;
+                    job.ResponseJson = SkillErrorResponse.Build(SkillErrorCode.ModeForbidden,
+                        "Permission changes and panel decisions must be made in the UnitySkills panel.",
+                        retryStrategy: SkillErrorResponse.RetryAskUserAndGrant);
+                    return;
+                }
                 if (string.Equals(path, "/permission/grant", StringComparison.OrdinalIgnoreCase))
                 {
                     HandlePermissionGrant(job);

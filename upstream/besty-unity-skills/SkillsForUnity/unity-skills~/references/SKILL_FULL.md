@@ -86,13 +86,11 @@ Approval grants are **single-shot one-step execution**: a successful `/permissio
 
 On `MODE_RESTRICTED`, branch on `details.approvalChannel`:
 
-**Dialog channel** (`"dialog"`, default — `panelApprovalRequired = false`)
+**Legacy dialog channel**
 
-1. Tell the user in chat: "要调用 `<skill>` 来 `<目的>`，参数 `<argsSummary>`，请求码 #`<token 前 6 位>`，是否允许？"
-2. After explicit user consent, call `POST /permission/grant { skill, token, args }` **once**
-3. On success, the response contains `{ ok: true, executed: true, skill, result: <Execute output> }` — the skill has already run server-side. Consume `result` directly; **do not call the original skill endpoint again**
+New grant requests always use the panel channel. An HTTP token cannot prove conversational consent.
 
-**Panel channel** (`"panel"`, when `panelApprovalRequired = true`)
+**Panel channel** (`"panel"`, always)
 
 1. Tell the user in chat: "要调用 `<skill>` 来 `<目的>`，请到 `Window > UnitySkills` 面板的 Pending Grant Requests 点 `[Approve]`（请求码 #`<token 前 6 位>`）"
 2. **Do not call `/permission/grant` yet** — calling it before the user clicks Approve returns `GRANT_PENDING_APPROVAL`
@@ -110,9 +108,9 @@ The Allowlist is a **user-managed** permanent whitelist of skill names, configur
 - Allowlisted skills execute directly under any mode — the server skips the Approval/MODE_RESTRICTED gate
 - **An Allowlist entry overrides MODE_FORBIDDEN** for that skill (covers Delete / MayEnterPlayMode / MayTriggerReload / `RiskLevel="high"`). This is intentional: the user has explicitly opted in
 - **Allowlist does NOT bypass the high-risk ConfirmationToken gate.** When `RequireConfirmation` is enabled (Settings drawer → Runtime → Require Confirmation), high-risk skills still require the `_confirm` token two-step handshake even if allowlisted — Allowlist only covers the mode/approval channel, not the per-call safety confirmation
+- Allowlist changes and grant approval/denial are performed only in the UnitySkills panel; their former HTTP POST endpoints return 403.
+- `GET /permission/allowlist` remains available for inspection.
 - The list is **opaque to the AI**: allowlisted skills look like normal successful calls, never returning `MODE_RESTRICTED`
-- **The AI should not call `/permission/allowlist/add` on its own initiative.** Only call it when the user has explicitly authorized a session-scoped bulk add (e.g. "把这几个 skill 加白名单方便我后面批量调"); otherwise direct the user to add entries through the panel
-- Allowlist endpoints: `GET /permission/allowlist` / `POST /permission/allowlist/add` / `POST /permission/allowlist/remove` (body `{skill}` or `{all: true}`)
 
 > The previous `GrantedSkills` semantics ("after one grant the skill is permanently auto-allowed") has been removed. Grants are now single-shot. Permanent allow == Allowlist; one-shot approval == grant.
 

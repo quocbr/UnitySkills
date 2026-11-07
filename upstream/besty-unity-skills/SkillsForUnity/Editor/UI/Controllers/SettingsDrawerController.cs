@@ -302,13 +302,6 @@ namespace UnitySkills
                         SkillsModeManager.CurrentMode = target; // The setter triggers OnChanged → RefreshPermissionsUi
                 });
 
-            if (_panelApprovalToggle != null)
-                _panelApprovalToggle.RegisterValueChangedCallback(evt =>
-                {
-                    if (evt.newValue != SkillsModeManager.PanelApprovalRequired)
-                        SkillsModeManager.PanelApprovalRequired = evt.newValue;
-                });
-
             if (_confirmToggle != null)
                 _confirmToggle.RegisterValueChangedCallback(evt =>
                 {
@@ -1062,8 +1055,8 @@ namespace UnitySkills
             SyncModeDropdownValue(mode);
             ApplyModeHintText(mode);
 
-            // 2) The Panel Approval row is only visible in Approval mode
-            _panelApprovalRow.SetVisible(mode == SkillsOperatingMode.Approval);
+            // Panel approval is mandatory; do not offer a switch that cannot change it.
+            _panelApprovalRow.SetVisible(false);
             if (_panelApprovalToggle != null)
                 _panelApprovalToggle.SetValueWithoutNotify(SkillsModeManager.PanelApprovalRequired);
             if (_confirmToggle != null)

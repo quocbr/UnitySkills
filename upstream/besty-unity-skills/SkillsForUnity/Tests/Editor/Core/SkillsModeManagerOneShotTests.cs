@@ -64,6 +64,7 @@ namespace UnitySkills.Tests.Core
             const string skillName = "one_shot_clear_probe";
 
             var (token, _, _) = SkillsModeManager.IssueGrantRequest(skillName, "{}");
+            Assert.IsTrue(SkillsModeManager.Approve(token));
             var (outcome, _, _) = SkillsModeManager.TryGrantAndReturnArgs(skillName, token, "{}");
             Assert.AreEqual(GrantOutcome.Granted, outcome);
 
@@ -84,6 +85,7 @@ namespace UnitySkills.Tests.Core
             const string skillName = "one_shot_expiry_probe";
 
             var (token, _, _) = SkillsModeManager.IssueGrantRequest(skillName, "{}");
+            Assert.IsTrue(SkillsModeManager.Approve(token));
             var (outcome, _, _) = SkillsModeManager.TryGrantAndReturnArgs(skillName, token, "{}");
             Assert.AreEqual(GrantOutcome.Granted, outcome);
 
@@ -109,6 +111,7 @@ namespace UnitySkills.Tests.Core
             const string skillName = "one_shot_mismatch_probe";
 
             var (token, _, _) = SkillsModeManager.IssueGrantRequest(skillName, "{}");
+            Assert.IsTrue(SkillsModeManager.Approve(token));
             var (outcome, _, _) = SkillsModeManager.TryGrantAndReturnArgs(skillName, token, "{}");
             Assert.AreEqual(GrantOutcome.Granted, outcome);
 

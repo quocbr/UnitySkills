@@ -13,6 +13,7 @@ namespace UnitySkills.Tests.Core
     {
         private SkillsOperatingMode _savedMode;
         private SurfaceProfileKind _savedProfile;
+        private bool? _savedConfirmationOverride;
 
         [SetUp]
         public void SetUp()
@@ -26,6 +27,8 @@ namespace UnitySkills.Tests.Core
             // NoSceneAuthoring, which would turn every diff into an empty set. The pref is global, so restore it.
             _savedProfile = SkillsSurfaceProfile.Current;
             SkillsSurfaceProfile.Current = SurfaceProfileKind.Full;
+            _savedConfirmationOverride = ConfirmationTokenService.RequireConfirmationOverrideForTests;
+            ConfirmationTokenService.RequireConfirmationOverrideForTests = false;
             EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Single);
             GameObjectFinder.InvalidateCache();
         }
@@ -35,6 +38,7 @@ namespace UnitySkills.Tests.Core
         {
             GameObjectFinder.InvalidateCache();
             SkillsSurfaceProfile.Current = _savedProfile;
+            ConfirmationTokenService.RequireConfirmationOverrideForTests = _savedConfirmationOverride;
             SkillsModeManager.CurrentMode = _savedMode;
         }
 

@@ -24,6 +24,7 @@ namespace UnitySkills.Tests.OptionalPackages
 
         private SkillsOperatingMode _savedMode;
         private SurfaceProfileKind _savedProfile;
+        private bool? _savedConfirmationOverride;
 
         /// <summary>A read-only skill of the module; MISSING_PACKAGE from it ignores the fixture.</summary>
         protected abstract string ProbeSkill { get; }
@@ -36,6 +37,8 @@ namespace UnitySkills.Tests.OptionalPackages
             // Saved before anything can Assert.Ignore: NUnit still runs OneTimeTearDown for an ignored fixture.
             _savedMode = SkillsModeManager.CurrentMode;
             _savedProfile = SkillsSurfaceProfile.Current;
+            _savedConfirmationOverride = ConfirmationTokenService.RequireConfirmationOverrideForTests;
+            ConfirmationTokenService.RequireConfirmationOverrideForTests = false;
             SkillsModeManager.CurrentMode = SkillsOperatingMode.Bypass;
             SkillsSurfaceProfile.Current = SurfaceProfileKind.Full;
 
@@ -59,6 +62,7 @@ namespace UnitySkills.Tests.OptionalPackages
         {
             SkillsModeManager.CurrentMode = _savedMode;
             SkillsSurfaceProfile.Current = _savedProfile;
+            ConfirmationTokenService.RequireConfirmationOverrideForTests = _savedConfirmationOverride;
         }
 
         [SetUp]

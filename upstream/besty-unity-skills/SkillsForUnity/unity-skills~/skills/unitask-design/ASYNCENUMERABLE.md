@@ -156,7 +156,7 @@ public abstract class ChannelWriter<T>
 public partial class ChannelClosedException : InvalidOperationException { }
 ```
 
-The 2.5.10 source ships `SingleConsumerUnboundedChannel<T>` (`Channel.cs:90`) as the only built-in implementation — a single-consumer, unbounded MPSC queue.
+The referenced source ships `SingleConsumerUnboundedChannel<T>` (`Channel.cs:90`) as the only built-in implementation — a single-consumer, unbounded MPSC queue.
 
 ```csharp
 var channel = Channel.CreateSingleConsumerUnbounded<int>();

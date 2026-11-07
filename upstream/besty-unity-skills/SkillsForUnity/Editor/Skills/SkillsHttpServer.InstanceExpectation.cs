@@ -63,13 +63,25 @@ namespace UnitySkills
         }
 
         /// <summary>
-        /// /health (and its / alias) never checks an expectation — discovery must always be able to read who is
-        /// serving — and neither does a CORS preflight, which carries no custom headers.
+        /// GET /health (and its / alias) never checks an expectation so discovery can read the server identity.
+        /// OPTIONS preflight is also exempt; POST always requires an expected instance.
         /// </summary>
         private static bool IsInstanceCheckExempt(string httpMethod, string path) =>
             string.Equals(httpMethod, "OPTIONS", StringComparison.OrdinalIgnoreCase) ||
-            path == "/" ||
-            string.Equals(path, "/health", StringComparison.OrdinalIgnoreCase);
+            (string.Equals(httpMethod, "GET", StringComparison.OrdinalIgnoreCase) &&
+             (path == "/" || string.Equals(path, "/health", StringComparison.OrdinalIgnoreCase)));
+
+        // Browser requests must originate from this exact loopback server. Native
+        // clients do not send Origin and continue to work without CORS.
+        internal static bool IsTrustedOrigin(string origin, int port)
+        {
+            if (string.IsNullOrEmpty(origin)) return true;
+            if (!Uri.TryCreate(origin, UriKind.Absolute, out var uri)) return false;
+            return uri.Scheme == Uri.UriSchemeHttp && uri.Port == port &&
+                   (string.Equals(uri.Host, "localhost", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(uri.Host, "127.0.0.1", StringComparison.OrdinalIgnoreCase)) &&
+                   uri.AbsolutePath == "/" && string.IsNullOrEmpty(uri.Query);
+        }
 
         /// <summary>
         /// Reads the caller's expected instance from the query string (expectInstance / expectProject) and the

@@ -1,6 +1,6 @@
 ---
 name: unity-unitask-design
-description: Source-anchored design rules for UniTask 2.5.10
+description: Source-anchored design rules for UniTask 2.5.10 and 2.5.11
 ---
 
 > **Before calling any skill in this module:** if you are about to call a skill with parameters guessed from its name or description, STOP — read this file (or fetch its schema via `GET /skills/recommend?includeSchema=true`) first. If you already have the parameter definitions from recommend/schema, you may proceed straight to dryRun.
@@ -14,8 +14,7 @@ description: Source-anchored design rules for UniTask 2.5.10
 
 # UniTask - Design Rules
 
-Advisory module. Every rule is distilled from Cysharp UniTask source at:
-- **2.5.10** — `com.cysharp.unitask@2.5.10` (Unity 2018.4 baseline; actively used with 2022.3 / Unity 6)
+Advisory module. The source anchors below were checked against Cysharp UniTask **2.5.10** and have not been re-audited against 2.5.11. The [2.5.11 release](https://github.com/Cysharp/UniTask/releases/tag/2.5.11) lists a Unity 6.2+ Editor TreeView compatibility fix and does not list a runtime API change. Use this guide with `com.cysharp.unitask@2.5.10` or `@2.5.11`, after checking the target project's resolved package version.
 
 Each rule cites a concrete file/line so the reasoning is auditable and the AI does not improvise against stale memory.
 
@@ -76,7 +75,7 @@ Load before writing or reviewing any of:
 
 ## Version Scope
 
-Targets **UniTask 2.5.10**. Earlier 2.x versions are mostly source-compatible; key differences:
+Targets **UniTask 2.5.10–2.5.11**. Source line anchors are from 2.5.10; confirm them against 2.5.11 when relying on an implementation detail. Earlier 2.x versions are mostly source-compatible; key differences:
 - `WaitForEndOfFrame(MonoBehaviour coroutineRunner)` overload added in recent 2.x — on 2023.1+ a parameterless overload is available (`#if UNITY_2023_1_OR_NEWER`). See `UniTask.Delay.cs:78-103`.
 - `UniTask.WhenEach` is a newer addition; not all 2.x builds ship it.
 

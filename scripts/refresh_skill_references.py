@@ -15,10 +15,23 @@ TEMPLATE = ROOT / "unity-skills"
 OFFICIAL = ROOT / "upstream" / "unity-technologies-skills"
 BESTY = ROOT / "upstream" / "besty-unity-skills"
 NICE_WOLF = ROOT / "upstream" / "nice-wolf-studio-unity-claude-skills"
+GAMEDEV = ROOT / "upstream" / "gamedev-agent-skills"
 BESTY_TEMPLATE = BESTY / "SkillsForUnity" / "unity-skills~"
 PACKAGE_ARCHIVE = BESTY_TEMPLATE.with_name("workbench-skill~") / "template.zip"
 REVISION = "workbench-revision.txt"
 LINK = re.compile(r"(\]\()([^\s)#]+)(?=[)#\s])")
+TEXT_SUFFIXES = {
+    ".cs", ".hlsl", ".json", ".md", ".meta", ".py", ".sh",
+    ".txt", ".uss", ".uxml", ".xml", ".yaml", ".yml",
+}
+
+
+def archive_content(source):
+    """Keep the package archive stable across LF and CRLF worktrees."""
+    content = source.read_bytes()
+    if source.suffix.lower() in TEXT_SUFFIXES or source.name == "LICENSE":
+        return content.replace(b"\r\n", b"\n")
+    return content
 
 
 def refresh():
@@ -43,6 +56,10 @@ def refresh():
     copies[BESTY / "LICENSE"] = TEMPLATE / "LICENSE"
     copies[OFFICIAL / "LICENSE.md"] = TEMPLATE / "references" / "unity-technologies" / "LICENSE.md"
     copies[NICE_WOLF / "LICENSE"] = nice_wolf_reference / "LICENSE"
+    copies[GAMEDEV / "scripts" / "check_unity_project.py"] = TEMPLATE / "scripts" / "check_unity_project.py"
+    gamedev_reference = TEMPLATE / "references" / "gamedev-agent-skills"
+    copies[GAMEDEV / "LICENSE"] = gamedev_reference / "LICENSE"
+    copies[GAMEDEV / "NOTICE"] = gamedev_reference / "NOTICE"
 
     for source, destination in copies.items():
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -70,7 +87,7 @@ def refresh():
             if not source.is_file() or "__pycache__" in source.parts or source.name in ("agent_config.json", REVISION):
                 continue
             name = source.relative_to(TEMPLATE).as_posix()
-            content = source.read_bytes()
+            content = archive_content(source)
             revision.update(name.encode("utf-8") + b"\0" + sha256(content).digest())
             archive.writestr(ZipInfo(name), content, compress_type=ZIP_DEFLATED)
 

@@ -189,19 +189,23 @@ namespace UnitySkills.Tests.Core
         }
 
         [Test]
-        public void Approval_DialogChannel_GrantIsOneShot_NotWrittenToAllowlist()
+        public void Approval_LegacyDialogPreference_StillRequiresPanelAndGrantsOneShot()
         {
             SkillsModeManager.CurrentMode = SkillsOperatingMode.Approval;
-            SkillsModeManager.PanelApprovalRequired = false; // Same as the default value; written explicitly to show intent
+            SkillsModeManager.PanelApprovalRequired = false; // A legacy preference cannot disable panel approval.
 
             const string skillName = "smart_layout";
             const string args = "{\"target\":\"Cube\"}";
 
             var (token, ttl, channel) = SkillsModeManager.IssueGrantRequest(skillName, args);
-            Assert.AreEqual(SkillsModeManager.ApprovalChannel.Dialog, channel);
+            Assert.IsTrue(SkillsModeManager.PanelApprovalRequired);
+            Assert.AreEqual(SkillsModeManager.ApprovalChannel.Panel, channel);
             Assert.Greater(ttl, 0, "TTL should be a positive number of seconds");
             Assert.IsFalse(string.IsNullOrWhiteSpace(token), "Token must be non-empty");
 
+            Assert.AreEqual(GrantOutcome.PendingApproval,
+                SkillsModeManager.TryGrantDetailed(skillName, token, args));
+            Assert.IsTrue(SkillsModeManager.Approve(token));
             Assert.IsTrue(SkillsModeManager.TryGrant(skillName, token, args));
 
             // A grant no longer permanently writes the allowlist. Re-checking access (with no one-shot re-entry) should return NeedsGrant again.
@@ -383,6 +387,7 @@ namespace UnitySkills.Tests.Core
             const string args = "{\"x\":1}";
 
             var (token, _, _) = SkillsModeManager.IssueGrantRequest(skillName, args);
+            Assert.IsTrue(SkillsModeManager.Approve(token));
             Assert.IsTrue(SkillsModeManager.TryGrant(skillName, token, args));
 
             // Writing is asynchronous, so a flush must be forced before ReadRecent can see this line.
@@ -490,6 +495,7 @@ namespace UnitySkills.Tests.Core
             const string args = "{\"target\":\"Cube\",\"value\":42}";
 
             var (token, _, _) = SkillsModeManager.IssueGrantRequest(skillName, args);
+            Assert.IsTrue(SkillsModeManager.Approve(token));
 
             var (outcome, returnedName, returnedArgs) =
                 SkillsModeManager.TryGrantAndReturnArgs(skillName, token, args);
@@ -535,6 +541,7 @@ namespace UnitySkills.Tests.Core
             const string args = "{}";
 
             var (token, _, _) = SkillsModeManager.IssueGrantRequest(skillName, args);
+            Assert.IsTrue(SkillsModeManager.Approve(token));
             var (outcome, _, _) = SkillsModeManager.TryGrantAndReturnArgs(skillName, token, args);
             Assert.AreEqual(GrantOutcome.Granted, outcome);
 
@@ -556,6 +563,7 @@ namespace UnitySkills.Tests.Core
             // A name mismatch after a one-shot is set also doesn't consume it
             SkillsModeManager.CurrentMode = SkillsOperatingMode.Approval;
             var (token, _, _) = SkillsModeManager.IssueGrantRequest("alpha", "{}");
+            Assert.IsTrue(SkillsModeManager.Approve(token));
             SkillsModeManager.TryGrantAndReturnArgs("alpha", token, "{}");
 
             Assert.IsFalse(SkillsModeManager.ConsumeOneShotBypass("beta"));

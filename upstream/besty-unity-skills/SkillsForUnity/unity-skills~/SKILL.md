@@ -16,7 +16,7 @@ compatibility: Requires Unity Editor 2022.3+/6000.x with the UnitySkills package
 
 ## Target the right Editor
 
-Ports `8090`–`8100` go first come, first served: add `?expectProject=<project>` (productName or folder name) or the exact `?expectInstance=<instanceId>` to every write. A different Editor answers 409 `INSTANCE_MISMATCH` and runs nothing.
+Ports `8090`–`8100` go first come, first served: add `?expectProject=<project>` (productName or folder name) or the exact `?expectInstance=<instanceId>` to every POST. A different Editor answers 409 `INSTANCE_MISMATCH` and runs nothing.
 
 `GET /health` (exempt from the check) has `currentMode`, `surfaceProfile`, `dryRunPolicy`, `instanceId`: probe it once in the same shell command as your first request, adding no other call, then only after a refused write, 409, 503/refused connection or odd mode. `bypass` and `auto` run writes directly, but under `auto` confirm ≥5-object batches, prefab apply, scene-level, asset-overwriting or irreversible changes with the user first (probe alone before those); `approval` gates `FullAuto` writes behind single-shot grants (permanent: the user's Allowlist).
 

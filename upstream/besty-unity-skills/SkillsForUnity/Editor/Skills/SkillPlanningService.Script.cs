@@ -20,6 +20,9 @@ namespace UnitySkills
             var args = validation.Args;
             var scriptName = GetStringArg(args, "scriptName", "name");
             var folder = GetStringArg(args, "folder") ?? "Assets/Scripts";
+            bool folderValid = Validate.SafePath(folder, "folder") == null;
+            if (!folderValid)
+                AddSemanticError(validation, "folder", "Folder must be under Assets/ or Packages/ and contain no '..' traversal.");
             var template = GetStringArg(args, "template");
             bool fromTemplate = string.IsNullOrEmpty(GetStringArg(args, "content"));
 
@@ -43,7 +46,7 @@ namespace UnitySkills
 
                 var predictedPath = Path.Combine(folder, scriptName + ".cs").Replace('\\', '/');
                 // script_create refuses an existing file (it never overwrites), so dryRun must not promise an overwrite.
-                if (File.Exists(predictedPath))
+                if (folderValid && File.Exists(predictedPath))
                     AddSemanticError(validation, "scriptName",
                         $"Script already exists at '{predictedPath}'; script_create never overwrites. Edit it with script_replace/script_append or choose another scriptName/folder.");
             }

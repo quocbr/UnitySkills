@@ -96,6 +96,14 @@ namespace UnitySkills
                         continue;
                     }
 
+                    if (!IsTrustedOrigin(request.Headers["Origin"], _port))
+                    {
+                        SendImmediateJsonResponse(context, request, 403, BuildErrorPayload(SkillErrorResponse.Build(
+                            SkillErrorCode.ModeForbidden, "Cross-origin requests are not allowed.",
+                            retryStrategy: SkillErrorResponse.Abort)));
+                        continue;
+                    }
+
                     // Expected-instance guard: a caller that names the Editor it means (expectInstance / expectProject as a
                     // query parameter, or an X-Expect-Instance / X-Expect-Project header) is refused with 409
                     // INSTANCE_MISMATCH when this server is another one, before anything is queued or executed. /health
@@ -105,6 +113,13 @@ namespace UnitySkills
                     {
                         var expectation = ReadInstanceExpectation(
                             url.Query, request.Headers[ExpectInstanceHeader], request.Headers[ExpectProjectHeader]);
+                        if (request.HttpMethod == "POST" && expectation == null)
+                        {
+                            SendImmediateJsonResponse(context, request, 400, BuildErrorPayload(SkillErrorResponse.Build(
+                                SkillErrorCode.MissingParam, "POST requests require expectInstance or expectProject.",
+                                retryStrategy: SkillErrorResponse.RetryFixAndRetry)));
+                            continue;
+                        }
                         string servingInstanceId = _snapInstanceId;
                         if (expectation != null && servingInstanceId != null &&
                             !expectation.Matches(servingInstanceId, _snapProjectName, _snapProjectPath))
@@ -373,7 +388,6 @@ namespace UnitySkills
                 // CORS headers
                 response.Headers.Add("Access-Control-Allow-Methods", CorsAllowMethods);
                 response.Headers.Add("Access-Control-Allow-Headers", CorsAllowHeaders);
-                response.Headers.Add("Access-Control-Allow-Origin", "*");
                 response.Headers.Add("X-Request-Id", job.RequestId);
                 response.Headers.Add("X-Agent-Id", job.AgentId);
                 AddInstanceHeaders(response);

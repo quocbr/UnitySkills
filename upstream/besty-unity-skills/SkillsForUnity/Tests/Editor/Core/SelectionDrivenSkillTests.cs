@@ -12,12 +12,15 @@ namespace UnitySkills.Tests.Core
     {
         private const string TempRoot = "Assets/Temp/SelectionDrivenSkillTests";
         private SkillsOperatingMode _savedMode;
+        private bool? _savedConfirmationOverride;
 
         [SetUp]
         public void SetUp()
         {
             _savedMode = SkillsModeManager.CurrentMode;
             SkillsModeManager.CurrentMode = SkillsOperatingMode.Bypass;
+            _savedConfirmationOverride = ConfirmationTokenService.RequireConfirmationOverrideForTests;
+            ConfirmationTokenService.RequireConfirmationOverrideForTests = false;
 
             if (!AssetDatabase.IsValidFolder(TempRoot))
             {
@@ -57,6 +60,7 @@ namespace UnitySkills.Tests.Core
 
             AssetDatabase.Refresh();
             SkillsModeManager.CurrentMode = _savedMode;
+            ConfirmationTokenService.RequireConfirmationOverrideForTests = _savedConfirmationOverride;
         }
 
         [Test]
