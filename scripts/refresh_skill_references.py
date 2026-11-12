@@ -37,11 +37,13 @@ def archive_content(source):
 def refresh():
     copies = {}
     nice_wolf_reference = TEMPLATE / "references" / "nice-wolf-studio"
+    gamedev_reference = TEMPLATE / "references" / "gamedev-agent-skills"
     for source_root, destination_root in (
         (BESTY_TEMPLATE, TEMPLATE),
         (OFFICIAL / "skills", TEMPLATE / "references" / "unity-technologies"),
         (NICE_WOLF / "skills", nice_wolf_reference),
         (NICE_WOLF / "unity-ops" / "skills", nice_wolf_reference),
+        (GAMEDEV / "skills", gamedev_reference),
     ):
         for source in source_root.rglob("*"):
             if not source.is_file() or "__pycache__" in source.parts or source.name == "agent_config.json":
@@ -57,7 +59,6 @@ def refresh():
     copies[OFFICIAL / "LICENSE.md"] = TEMPLATE / "references" / "unity-technologies" / "LICENSE.md"
     copies[NICE_WOLF / "LICENSE"] = nice_wolf_reference / "LICENSE"
     copies[GAMEDEV / "scripts" / "check_unity_project.py"] = TEMPLATE / "scripts" / "check_unity_project.py"
-    gamedev_reference = TEMPLATE / "references" / "gamedev-agent-skills"
     copies[GAMEDEV / "LICENSE"] = gamedev_reference / "LICENSE"
     copies[GAMEDEV / "NOTICE"] = gamedev_reference / "NOTICE"
 
