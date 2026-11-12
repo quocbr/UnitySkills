@@ -105,7 +105,8 @@ namespace UnitySkills
             _resultLabel   = _root.Q<Label>("detail-result-label");
             _resultField   = _root.Q<TextField>("detail-result-field");
 
-            UISkillsEditorIcons.Apply(_refreshBtn, "d_Refresh", "Refresh", "TreeEditor.Refresh");
+            VectorGlyphs.SetIcon(_refreshBtn, VectorGlyph.Refresh);
+            VectorGlyphs.SetIcon(_validateBtn, VectorGlyph.Check);
         }
 
         private void BindEvents()
@@ -243,9 +244,7 @@ namespace UnitySkills
             header.AddToClassList("category-header");
             header.RegisterCallback<ClickEvent>(_ => ToggleCategory(header.userData as SkillsListItem));
 
-            var chevron = new Label { name = "category-chevron" };
-            chevron.AddToClassList("chevron");
-            header.Add(chevron);
+            header.Add(VectorGlyphs.Disclosure(false, "category-chevron"));
 
             var nameLabel = new Label { name = "category-name" };
             nameLabel.AddToClassList("flex-grow");
@@ -312,11 +311,11 @@ namespace UnitySkills
             if (isCategory)
             {
                 header.userData = listItem;
-                var chevron = header.Q<Label>("category-chevron");
+                var chevron = header.Q("category-chevron");
                 var nameLabel = header.Q<Label>("category-name");
                 var countLabel = header.Q<Label>("category-count");
                 bool expanded = EditorPrefs.GetBool(listItem.FoldKey, false);
-                if (chevron != null) chevron.text = expanded ? "▼" : "▶";
+                VectorGlyphs.SetOpen(chevron, expanded);
                 if (nameLabel != null) nameLabel.text = listItem.CategoryName;
                 if (countLabel != null) countLabel.text = listItem.SkillCount.ToString();
                 var toggle = header.Q<Toggle>("category-enable");

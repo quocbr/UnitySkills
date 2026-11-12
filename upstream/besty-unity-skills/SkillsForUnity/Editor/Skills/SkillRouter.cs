@@ -4,6 +4,7 @@ using System.Linq;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using UnityEditor;
+using UnitySkills.Internal;
 using UnityEngine;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
@@ -27,6 +28,9 @@ namespace UnitySkills
         internal sealed class ParameterValidationResult
         {
             public JObject Args { get; set; }
+            /// <summary>The request body as received. Args is already parsed, and parsing keeps only the last of two equal keys;
+            /// a planner that must refuse duplicate keys (the particle configs) scans this text instead.</summary>
+            public string RawJson { get; set; }
             public object[] InvokeArgs { get; set; }
             public List<string> MissingParams { get; } = new List<string>();
             public List<object> UnknownParams { get; } = new List<object>();
@@ -89,10 +93,8 @@ namespace UnitySkills
         // One-time subscription to SkillsSurfaceProfile.OnChanged, wired up in Initialize().
         private static bool _surfaceHookInstalled;
 
-        // Dirty marker for the manually-recorded session (workflow_begin_task): the (taskId, snapshotCount) recorded at the last SaveHistory. Lets a tracked skill skip a redundant save
-        // when there are no new snapshots since the last save.
-        private static string _lastSavedTaskId;
-        private static int _lastSavedSnapshotCount = -1;
+        // The last Execute's auto-workflow EndTask cost; the HTTP layer moves it into the telemetry row (never the response).
+        private static long? _lastWorkflowEndMs;
         // These four all have to be volatile: they form the read side of the GET fast-path double-
         // checked lock -- the HTTP thread reads them outside _initLock (TryGetCachedGetResponse)
         // while the main thread publishes inside the lock. Without volatile, the read side could hold a stale copy hoisted out of a loop after a profile switch invalidated it.
@@ -140,25 +142,31 @@ namespace UnitySkills
             "limit",
             "pageOffset",
             "pageLimit",
-            "_confirm"
+            "_confirm",
+            CheckpointParameterName
         };
 
-        /// <summary>Envelope-level body keys every skill accepts (paging, verbose, _confirm), case-insensitive.</summary>
+        /// <summary>Envelope-level body keys every skill accepts (paging, verbose, _confirm, _checkpoint), case-insensitive.</summary>
         internal static bool IsReservedBodyParameter(string name) =>
             !string.IsNullOrEmpty(name) && _reservedBodyParameters.Contains(name);
 
         private const string EntityIdParameterName = "entityId";
 
+        /// <summary>Envelope key that asks for an explicit checkpoint with this label before the call's first recorded step.</summary>
+        internal const string CheckpointParameterName = "_checkpoint";
+
         private const string PrefKeySummaryAutoTruncate = "UnitySkills_SummaryAutoTruncate";
         private const string PrefKeySummaryPageSize = "UnitySkills_SummaryPageSize";
-        public const int DefaultSummaryPageSize = 10;
+        // Full's page size, so a fresh install (Full profile, truncation on) resolves to TokenLevel.Full, not Custom.
+        public const int DefaultSummaryPageSize = SkillsTokenLevel.FullPageSize;
         private static bool? _summaryAutoTruncate;
         private static int? _summaryPageSize;
 
         /// <summary>
-        /// Raised after either summary preference is changed through this class. EditorPrefs and
-        /// all subscribers are expected to run on Unity's main thread; HTTP worker threads only
-        /// enqueue requests and never access these properties directly.
+        /// Raised after either summary preference is changed through this class. Both are
+        /// per-project settings (<see cref="ProjectPrefs"/>, falling back to the pre-3.0 machine-wide
+        /// EditorPrefs value); the store and all subscribers are expected to run on Unity's main
+        /// thread; HTTP worker threads only enqueue requests and never access these properties directly.
         /// </summary>
         public static event Action SummarySettingsChanged;
 
@@ -174,15 +182,15 @@ namespace UnitySkills
             {
                 if (!_summaryAutoTruncate.HasValue)
                 {
-                    if (EditorPrefs.HasKey(PrefKeySummaryAutoTruncate))
-                        _summaryAutoTruncate = EditorPrefs.GetBool(PrefKeySummaryAutoTruncate, false);
+                    if (ProjectPrefs.HasKey(PrefKeySummaryAutoTruncate))
+                        _summaryAutoTruncate = ProjectPrefs.GetBool(PrefKeySummaryAutoTruncate, false);
                     else
                     {
-                        // Keep this list in lockstep with PermissionUiHelpers.IsExistingInstall
-                        // and SkillsModeManager.IsExistingInstall. The internal helper also lets
-                        // EditMode tests simulate an upgrade without creating machine prefs.
+                        // The shared upgrade probe (SkillsModeManager.IsExistingInstall) decides the
+                        // default. The internal helper also lets EditMode tests simulate an upgrade
+                        // without creating machine prefs.
                         _summaryAutoTruncate = !SkillsModeManager.IsExistingInstallForDefaults();
-                        EditorPrefs.SetBool(PrefKeySummaryAutoTruncate, _summaryAutoTruncate.Value);
+                        ProjectPrefs.SetBool(PrefKeySummaryAutoTruncate, _summaryAutoTruncate.Value);
                     }
                 }
                 return _summaryAutoTruncate.Value;
@@ -191,7 +199,7 @@ namespace UnitySkills
             {
                 bool changed = !_summaryAutoTruncate.HasValue || _summaryAutoTruncate.Value != value;
                 _summaryAutoTruncate = value;
-                EditorPrefs.SetBool(PrefKeySummaryAutoTruncate, value);
+                ProjectPrefs.SetBool(PrefKeySummaryAutoTruncate, value);
                 if (changed) RaiseSummarySettingsChanged();
             }
         }
@@ -208,14 +216,14 @@ namespace UnitySkills
             {
                 if (!_summaryPageSize.HasValue)
                 {
-                    if (!EditorPrefs.HasKey(PrefKeySummaryPageSize))
+                    if (!ProjectPrefs.HasKey(PrefKeySummaryPageSize))
                     {
                         _summaryPageSize = DefaultSummaryPageSize;
-                        EditorPrefs.SetInt(PrefKeySummaryPageSize, DefaultSummaryPageSize);
+                        ProjectPrefs.SetInt(PrefKeySummaryPageSize, DefaultSummaryPageSize);
                     }
                     else
                     {
-                        int stored = EditorPrefs.GetInt(PrefKeySummaryPageSize, DefaultSummaryPageSize);
+                        int stored = ProjectPrefs.GetInt(PrefKeySummaryPageSize, DefaultSummaryPageSize);
                         _summaryPageSize = stored > 0 ? stored : DefaultSummaryPageSize;
                     }
                 }
@@ -226,7 +234,7 @@ namespace UnitySkills
                 int normalized = value > 0 ? value : DefaultSummaryPageSize;
                 bool changed = !_summaryPageSize.HasValue || _summaryPageSize.Value != normalized;
                 _summaryPageSize = normalized;
-                EditorPrefs.SetInt(PrefKeySummaryPageSize, normalized);
+                ProjectPrefs.SetInt(PrefKeySummaryPageSize, normalized);
                 if (changed) RaiseSummarySettingsChanged();
             }
         }
@@ -262,6 +270,8 @@ namespace UnitySkills
             "sequencerPath"
         };
 
+        // Only decides whether a skill exposes the synthetic entityId (SupportsSyntheticEntityId): entityId is never
+        // forwarded as a name, since a same-name object would take the call.
         private static readonly string[] _entityIdNameFallbackParameters =
         {
             "name",
@@ -287,6 +297,7 @@ namespace UnitySkills
             "workflow_undo_task",
             "workflow_redo_task",
             "workflow_revert_task",
+            "workflow_restore",
             "workflow_session_undo"
         };
 
@@ -386,6 +397,13 @@ namespace UnitySkills
             {"rb", new[]{"rigidbody"}}, {"col", new[]{"collider"}},
             {"cam", new[]{"camera"}}, {"img", new[]{"texture","image"}},
             {"fx", new[]{"particle","effect"}}, {"vfx", new[]{"particle","effect"}},
+            // Built-in particle systems (Shuriken). English effect words (smoke, fire, rain) are particle_* tags, not synonyms:
+            // as synonyms they would also expand "run smoke test" or "fire an event" into particle intents.
+            {"shuriken", new[]{"particle"}},
+            {"粒子", new[]{"particle"}}, {"特效", new[]{"particle","effect"}},
+            {"发射", new[]{"emission","particle"}}, {"爆发", new[]{"burst","particle"}},
+            {"烟雾", new[]{"smoke","particle"}}, {"火焰", new[]{"fire","particle"}},
+            {"雨雪", new[]{"rain","snow","particle"}}, {"下雨", new[]{"rain","particle"}}, {"下雪", new[]{"snow","particle"}},
         };
 
         private static readonly Dictionary<string, SkillOperation> _operationKeywords = new Dictionary<string, SkillOperation>(StringComparer.OrdinalIgnoreCase)
@@ -437,6 +455,8 @@ namespace UnitySkills
             {"cinemachine", SkillCategory.Cinemachine},
             {"probuilder", SkillCategory.ProBuilder},
             {"xr", SkillCategory.XR},
+            {"particle", SkillCategory.Particle}, {"particles", SkillCategory.Particle}, {"shuriken", SkillCategory.Particle},
+            {"particlesystem", SkillCategory.Particle}, {"粒子", SkillCategory.Particle},
         };
 
         // Words that carry no routing information; they never earn name/tag/description credit. Operation verbs are not

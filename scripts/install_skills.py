@@ -59,9 +59,14 @@ def install(project, agent, migrate=False):
     legacy = legacy_skills(destination)
     installed = destination / TEMPLATE.name
     already_present = installed not in legacy and matches(TEMPLATE, installed)
-    if not already_present and installed not in legacy and same_file(installed / "EDITOR.md", TEMPLATE / "EDITOR.md"):
-        if (installed / "references" / "workflows.md").is_file():
-            legacy.append(installed)
+    if (
+        not already_present
+        and installed not in legacy
+        and (installed / "SKILL.md").is_file()
+        and (installed / "EDITOR.md").is_file()
+        and (installed / "references" / "workflows.md").is_file()
+    ):
+        legacy.append(installed)
     if (installed.exists() or installed.is_symlink()) and not already_present and installed not in legacy:
         raise FileExistsError(f"Existing skill differs. Move it before retrying: {installed}")
     if legacy and not migrate:

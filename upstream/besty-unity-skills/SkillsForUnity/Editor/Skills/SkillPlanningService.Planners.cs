@@ -60,6 +60,9 @@ namespace UnitySkills
             if (SkillsHttpServer.IsRuntimeInvocationSkill(skill.Name))
                 AnalyzeRuntimeExecution(skill.Name, validation, plan);
 
+            if (ParticleSkills.HasPlanner(skill.Name))
+                AnalyzeParticleSkill(skill, validation, plan);
+
             switch (skill.Name)
             {
                 case "camera_set_properties":
@@ -165,6 +168,18 @@ namespace UnitySkills
                 case "script_create":
                     AnalyzeScriptCreate(validation, plan);
                     break;
+                case "workflow_restore":
+                    AnalyzeWorkflowRestore(validation, plan);
+                    break;
+                case "workflow_undo_task":
+                    AnalyzeWorkflowUndoTask(validation, plan);
+                    break;
+                case "workflow_redo_task":
+                    AnalyzeWorkflowRedoTask(validation, plan);
+                    break;
+                case "workflow_session_undo":
+                    AnalyzeWorkflowSessionUndo(validation, plan);
+                    break;
                 case "timeline_add_audio_track":
                 case "timeline_add_animation_track":
                 case "timeline_add_activation_track":
@@ -200,6 +215,7 @@ namespace UnitySkills
             // and this generic check actively yields when one of them already covers the same target (see TokenAlreadyReported).
             // If placed first, an empty request body would get both verdicts at once, since nothing would yet be reported to yield to.
             ApplyRequiredInputGroups(skill, validation);
+            ApplyEntityIdLocatorChecks(skill, validation);
         }
 
         /// <summary>

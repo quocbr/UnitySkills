@@ -4,10 +4,13 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 using UnityEditor;
+using UnitySkills.Internal;
 using UnityEngine;
 
 namespace UnitySkills
@@ -28,7 +31,8 @@ namespace UnitySkills
     /// One JSONL line per call:
     /// <code>{"ts":"2026-07-09T...Z","skill":"gameobject_create","agent":"ClaudeCode",
     /// "mode":"execute","ok":true,"ms":12}</code>
-    /// (<c>errorCode</c> only appears when <c>ok</c> is false.)
+    /// (<c>errorCode</c> only appears when <c>ok</c> is false; so do the optional <c>err</c> and <c>target</c>
+    /// fields, which carry a path-redacted error message and argument summary.)
     /// </summary>
     public static class SkillTelemetryService
     {
@@ -54,7 +58,7 @@ namespace UnitySkills
         /// <see cref="ClientProcessResolver"/> at flush time (see <see cref="BuildLine"/>), not at enqueue
         /// time, since flush happens well after the resolver has had a chance to finish.
         /// </summary>
-        private sealed class PendingRecord
+        internal sealed class PendingRecord
         {
             public string Ts;
             public string Skill;
@@ -64,8 +68,14 @@ namespace UnitySkills
             public string Mode;
             public bool Ok;
             public string ErrorCode;
+            public string Error;
+            public string Target;
             public long DurationMs;
+            public long? WorkflowMs;
         }
+
+        private const int MaxErrorChars = 160;
+        private const int MaxTargetChars = 120;
 
         // Aggregation cache: caches the serialized /analytics JSON per window for 30 seconds, so
         // continuous polling doesn't reread up to 4MB from disk on every request.
@@ -73,7 +83,7 @@ namespace UnitySkills
         private const long AnalyticsCacheTtlTicks = 30L * TimeSpan.TicksPerSecond;
         private static readonly object _analyticsCacheLock = new object();
         private static readonly Dictionary<string, CachedAnalytics> _analyticsCache =
-            new Dictionary<string, CachedAnalytics>(StringComparer.OrdinalIgnoreCase);
+            new Dictionary<string, CachedAnalytics>(StringComparer.Ordinal);
 
         private struct CachedAnalytics
         {
@@ -105,17 +115,18 @@ namespace UnitySkills
         public static event Action OnChanged;
 
         /// <summary>
-        /// Master switch (EditorPrefs, on by default). When off, <see cref="Record"/> returns immediately.
-        /// The getter reads EditorPrefs, so it must be called on the main thread — every Record
-        /// call site satisfies this (skill execution already runs on the main thread).
+        /// Master switch, per project (<see cref="ProjectPrefs"/>, on by default). When off, <see cref="Record"/> returns
+        /// immediately. The getter reads the settings store (and possibly EditorPrefs for the pre-3.0 global value), so it
+        /// must be called on the main thread — every Record call site satisfies this (skill execution already runs on the
+        /// main thread).
         /// </summary>
         public static bool Enabled
         {
-            get => EditorPrefs.GetBool(PrefEnabled, true);
+            get => ProjectPrefs.GetBool(PrefEnabled, true);
             set
             {
-                if (EditorPrefs.GetBool(PrefEnabled, true) == value) return;
-                EditorPrefs.SetBool(PrefEnabled, value);
+                if (ProjectPrefs.GetBool(PrefEnabled, true) == value) return;
+                ProjectPrefs.SetBool(PrefEnabled, value);
                 OnChanged?.Invoke();
             }
         }
@@ -131,8 +142,13 @@ namespace UnitySkills
         /// used as-is and no late resolution is attempted. Otherwise <paramref name="agentId"/> is only the
         /// *fallback* (whatever header/User-Agent guess was available at call time) -- BuildLine re-checks
         /// ClientProcessResolver's cache at flush time and prefers that if it has since resolved.
+        ///
+        /// <paramref name="error"/>/<paramref name="target"/> are written only for failed (<paramref name="ok"/>=false)
+        /// lines. Callers pass them already path-redacted and truncated (see <see cref="SanitizeError"/>/<see cref="SanitizeTarget"/>).
+        ///
+        /// <paramref name="workflowMs"/> is the workflow history bookkeeping time of a tracked write (written as wfMs when present).
         /// </summary>
-        public static void Record(string skill, string agentId, string mode, bool ok, string errorCode, long durationMs, int remotePort = -1, bool agentIdIsExplicit = false)
+        public static void Record(string skill, string agentId, string mode, bool ok, string errorCode, long durationMs, int remotePort = -1, bool agentIdIsExplicit = false, string error = null, string target = null, long? workflowMs = null)
         {
             try
             {
@@ -150,7 +166,10 @@ namespace UnitySkills
                     Mode = mode,
                     Ok = ok,
                     ErrorCode = errorCode,
+                    Error = error,
+                    Target = target,
                     DurationMs = durationMs,
+                    WorkflowMs = workflowMs,
                 });
                 ScheduleFlush();
             }
@@ -176,21 +195,24 @@ namespace UnitySkills
         /// Results are cached per window for 30 seconds. Returns a complete JSON string ready to
         /// write directly into the HTTP response.
         /// </summary>
-        public static string BuildAnalyticsJson(string window)
+        public static string BuildAnalyticsJson(string window, string agent = null)
         {
             window = NormalizeWindow(window);
+            string agentFilter = NormalizeAgentFilter(agent);
+            // Filtered and unfiltered reports must never share a cache entry.
+            string cacheKey = agentFilter == null ? window : window + "\n" + agentFilter;
             long now = DateTime.UtcNow.Ticks;
 
             lock (_analyticsCacheLock)
             {
-                if (_analyticsCache.TryGetValue(window, out var cached) && now - cached.AtTicks < AnalyticsCacheTtlTicks)
+                if (_analyticsCache.TryGetValue(cacheKey, out var cached) && now - cached.AtTicks < AnalyticsCacheTtlTicks)
                     return cached.Json;
             }
 
             string json;
             try
             {
-                json = BuildAnalyticsJsonUncached(window);
+                json = BuildAnalyticsJsonUncached(window, agentFilter);
             }
             catch (Exception ex)
             {
@@ -202,9 +224,156 @@ namespace UnitySkills
 
             lock (_analyticsCacheLock)
             {
-                _analyticsCache[window] = new CachedAnalytics { Json = json, AtTicks = now };
+                _analyticsCache[cacheKey] = new CachedAnalytics { Json = json, AtTicks = now };
             }
             return json;
+        }
+
+        /// <summary>
+        /// Canonical form of the <c>?agent=</c> filter: trimmed, then folded with ClientProcessResolver's alias map
+        /// (<c>claude-code</c> becomes <c>ClaudeCode</c>). Returns null when no filter was given.
+        /// </summary>
+        internal static string NormalizeAgentFilter(string agent)
+        {
+            var trimmed = agent?.Trim();
+            return string.IsNullOrEmpty(trimmed) ? null : ClientProcessResolver.CanonicalizeExplicitAgentId(trimmed);
+        }
+
+        /// <summary>Failure detail: the message of a failed envelope, or null when it has none.</summary>
+        internal static string ErrorMessageOf(JToken failure)
+        {
+            var message = (failure as JObject)?["error"];
+            return message?.Type == JTokenType.String ? message.ToString() : null;
+        }
+
+        /// <summary>
+        /// Reads the top-level <c>errorCode</c> and <c>error</c> of a failed response. Nested fields (for
+        /// example an errorCode inside <c>details</c>) are never read. Unparseable input yields nulls.
+        /// </summary>
+        internal static void ReadFailureEnvelope(string json, out string errorCode, out string message)
+        {
+            errorCode = null;
+            message = null;
+            if (string.IsNullOrEmpty(json)) return;
+            try
+            {
+                var envelope = JObject.Parse(json);
+                var code = envelope["errorCode"];
+                errorCode = code?.Type == JTokenType.String ? code.ToString() : null;
+                message = ErrorMessageOf(envelope);
+            }
+            catch (JsonException)
+            {
+                // Not a JSON object: there is no structured failure detail to record.
+            }
+        }
+
+        /// <summary>Path-redacted error message for a failure line, cut to the telemetry limit. Main thread only.</summary>
+        internal static string SanitizeError(string message) =>
+            SanitizeError(message, RegistryService.ProjectPath, UserHomeFolder());
+
+        internal static string SanitizeError(string message, string projectRoot, string homeRoot) =>
+            RedactAndCut(message, MaxErrorChars, projectRoot, homeRoot);
+
+        /// <summary>
+        /// Path-redacted, short argument summary for a failure line. Main thread only.
+        /// </summary>
+        internal static string SanitizeTarget(string argsJson) =>
+            SanitizeTarget(argsJson, RegistryService.ProjectPath, UserHomeFolder());
+
+        /// <summary>
+        /// Redacts before SummarizeArgs truncates: a long home path cut at 32 characters would otherwise leave
+        /// a fragment of the user name that no longer matches the root. String values are redacted in the parsed
+        /// tree, the summary is taken from that, and the summary gets one more pass for SummarizeArgs' raw-text fallback.
+        /// </summary>
+        internal static string SanitizeTarget(string argsJson, string projectRoot, string homeRoot)
+        {
+            if (string.IsNullOrWhiteSpace(argsJson)) return null;
+
+            string summarySource;
+            try
+            {
+                var token = JToken.Parse(argsJson);
+                RedactStringValues(token, projectRoot, homeRoot);
+                summarySource = token.ToString(Formatting.None);
+            }
+            catch (JsonException)
+            {
+                summarySource = argsJson;
+            }
+
+            var summary = RedactPaths(SkillsModeManager.SummarizeArgs(summarySource), projectRoot, homeRoot);
+            return CutToLimit(summary, MaxTargetChars);
+        }
+
+        private static string UserHomeFolder() => Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+
+        private static string RedactAndCut(string text, int maxChars, string projectRoot, string homeRoot)
+        {
+            if (string.IsNullOrEmpty(text)) return null;
+            return CutToLimit(RedactPaths(text, projectRoot, homeRoot), maxChars);
+        }
+
+        private static string CutToLimit(string text, int maxChars)
+        {
+            if (string.IsNullOrEmpty(text)) return null;
+            return text.Length > maxChars ? text.Substring(0, maxChars) : text;
+        }
+
+        private static void RedactStringValues(JToken token, string projectRoot, string homeRoot)
+        {
+            switch (token)
+            {
+                case JObject obj:
+                    foreach (var prop in obj.Properties())
+                        RedactStringValues(prop.Value, projectRoot, homeRoot);
+                    break;
+                case JArray array:
+                    foreach (var item in array)
+                        RedactStringValues(item, projectRoot, homeRoot);
+                    break;
+                case JValue value when value.Type == JTokenType.String:
+                    value.Value = RedactPaths((string)value.Value, projectRoot, homeRoot);
+                    break;
+            }
+        }
+
+        /// <summary>
+        /// Replaces <paramref name="projectRoot"/> with <c>&lt;project&gt;</c>, then <paramref name="homeRoot"/> with <c>~</c>.
+        /// Both separator spellings are matched. The project root goes first, since it normally sits inside home.
+        /// </summary>
+        internal static string RedactPaths(string text, string projectRoot, string homeRoot)
+        {
+            if (string.IsNullOrEmpty(text)) return text;
+            text = ReplacePathRoot(text, projectRoot, "<project>");
+            return ReplacePathRoot(text, homeRoot, "~");
+        }
+
+        private static string ReplacePathRoot(string text, string root, string replacement)
+        {
+            root = root?.TrimEnd('/', '\\');
+            if (string.IsNullOrEmpty(root)) return text;
+            text = ReplaceAtPathBoundary(text, root.Replace('\\', '/'), replacement);
+            return ReplaceAtPathBoundary(text, root.Replace('/', '\\'), replacement);
+        }
+
+        /// <summary>Replaces occurrences that are not followed by more name characters, so <c>/Users/bet</c> never eats <c>/Users/betsy</c>.</summary>
+        private static string ReplaceAtPathBoundary(string text, string root, string replacement)
+        {
+            var sb = new StringBuilder(text.Length);
+            int pos = 0;
+            while (true)
+            {
+                int hit = text.IndexOf(root, pos, StringComparison.OrdinalIgnoreCase);
+                if (hit < 0) break;
+                int end = hit + root.Length;
+                bool continuesName = end < text.Length && (char.IsLetterOrDigit(text[end]) || text[end] == '_' || text[end] == '-' || text[end] == '.');
+                sb.Append(text, pos, (continuesName ? end : hit) - pos);
+                if (!continuesName) sb.Append(replacement);
+                pos = end;
+            }
+            sb.Append(text, pos, text.Length - pos);
+            return sb.ToString();
         }
 
         internal static IReadOnlyDictionary<string, RecommendationHealth> GetRecommendationHealth()
@@ -238,6 +407,19 @@ namespace UnitySkills
 
         /// <summary>Internal: synchronously drains the queue on the calling thread, to guarantee read consistency.</summary>
         internal static void FlushSync() => FlushPending();
+
+        /// <summary>
+        /// The delayed flush (see <see cref="FlushDelayMs"/>) is a thread-pool task that does not survive its domain, so
+        /// whatever is still queued when a domain reload starts or the editor quits is written out here. Logs nothing.
+        /// </summary>
+        [InitializeOnLoadMethod]
+        private static void RegisterLifecycleFlush()
+        {
+            if (ImportWorkerGate.IsWorkerProcess) return;
+
+            AssemblyReloadEvents.beforeAssemblyReload += FlushSync;
+            EditorApplication.quitting += FlushSync;
+        }
 
         /// <summary>
         /// Deletes telemetry records within a statistics window, using the same window values as
@@ -390,8 +572,13 @@ namespace UnitySkills
                         ["ok"] = r.Ok,
                     };
                     if (!r.Ok)
+                    {
                         payload["errorCode"] = r.ErrorCode;
+                        if (!string.IsNullOrEmpty(r.Err)) payload["err"] = r.Err;
+                        if (!string.IsNullOrEmpty(r.Target)) payload["target"] = r.Target;
+                    }
                     payload["ms"] = r.Ms;
+                    if (r.WfMs.HasValue) payload["wfMs"] = r.WfMs.Value;
                     writer.WriteLine(JsonConvert.SerializeObject(payload, Formatting.None, SkillsCommon.JsonSettings));
                 }
             }
@@ -413,7 +600,7 @@ namespace UnitySkills
 
         // ===== Write path =====
 
-        private static string BuildLine(PendingRecord record)
+        internal static string BuildLine(PendingRecord record)
         {
             // Late-bound agent identity: resolved right now (at flush time), not when Record() was called.
             // ClientProcessResolver.TryGetAgentId is a pure, thread-safe dictionary lookup -- safe to call from
@@ -434,9 +621,15 @@ namespace UnitySkills
                 ["ok"] = record.Ok,
             };
             // Convention: errorCode is omitted entirely when ok=true; kept (even if the value is null) when ok=false.
+            // err/target follow the same rule, but are omitted when the caller had nothing to record.
             if (!record.Ok)
+            {
                 payload["errorCode"] = record.ErrorCode;
+                if (!string.IsNullOrEmpty(record.Error)) payload["err"] = record.Error;
+                if (!string.IsNullOrEmpty(record.Target)) payload["target"] = record.Target;
+            }
             payload["ms"] = record.DurationMs;
+            if (record.WorkflowMs.HasValue) payload["wfMs"] = record.WorkflowMs.Value;
             return JsonConvert.SerializeObject(payload, Formatting.None, SkillsCommon.JsonSettings);
         }
 
@@ -554,7 +747,7 @@ namespace UnitySkills
         // ===== Read and aggregation path =====
 
         /// <summary>A parsed telemetry line, with field names bound to the JSONL keys.</summary>
-        private sealed class TelemetryRecord
+        internal sealed class TelemetryRecord
         {
             [JsonProperty("ts")] public string Ts;
             [JsonProperty("skill")] public string Skill;
@@ -562,7 +755,10 @@ namespace UnitySkills
             [JsonProperty("mode")] public string Mode;
             [JsonProperty("ok")] public bool Ok;
             [JsonProperty("errorCode")] public string ErrorCode;
+            [JsonProperty("err")] public string Err;
+            [JsonProperty("target")] public string Target;
             [JsonProperty("ms")] public long Ms;
+            [JsonProperty("wfMs")] public long? WfMs;
         }
 
         private static Dictionary<string, RecommendationHealth> BuildRecommendationHealth(
@@ -696,11 +892,19 @@ namespace UnitySkills
             }
         }
 
-        private static string BuildAnalyticsJsonUncached(string window)
+        private static string BuildAnalyticsJsonUncached(string window, string agentFilter) =>
+            AggregateAnalytics(ReadAll(), window, agentFilter, DateTime.UtcNow);
+
+        /// <summary>
+        /// Aggregates telemetry records into the /analytics report. Seam for tests: <paramref name="records"/> and
+        /// <paramref name="nowUtc"/> replace ReadAll() and DateTime.UtcNow. <paramref name="agent"/> is canonicalized
+        /// here (see NormalizeAgentFilter); when set, only matching records count and the report echoes it as <c>agent</c>.
+        /// </summary>
+        internal static string AggregateAnalytics(IEnumerable<TelemetryRecord> records, string window, string agent, DateTime nowUtc)
         {
             bool enabled = Enabled;
-            var all = ReadAll();
-            DateTime cutoff = WindowCutoffUtc(window);
+            string agentFilter = NormalizeAgentFilter(agent);
+            DateTime cutoff = WindowCutoffUtc(window, nowUtc);
             bool unbounded = string.Equals(window, "all", StringComparison.Ordinal);
 
             var perSkill = new Dictionary<string, SkillAgg>(StringComparer.Ordinal);
@@ -712,8 +916,10 @@ namespace UnitySkills
             int totalCalls = 0, okCalls = 0, errorCalls = 0;
             string firstTs = null, lastTs = null;
 
-            foreach (var r in all)
+            foreach (var r in records)
             {
+                if (agentFilter != null && !string.Equals(AgentLabel(r.Agent), agentFilter, StringComparison.OrdinalIgnoreCase))
+                    continue;
                 if (!unbounded)
                 {
                     if (!DateTime.TryParse(r.Ts, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var dt))
@@ -744,7 +950,7 @@ namespace UnitySkills
                 perMode.TryGetValue(modeKey, out var mc);
                 perMode[modeKey] = mc + 1;
 
-                string agentKey = string.IsNullOrEmpty(r.Agent) ? "(unknown)" : r.Agent;
+                string agentKey = AgentLabel(r.Agent);
                 perAgent.TryGetValue(agentKey, out var ac);
                 perAgent[agentKey] = ac + 1;
 
@@ -837,9 +1043,7 @@ namespace UnitySkills
             // The 10 most recent errors, newest first.
             var recentSlice = errorRecords.Skip(Math.Max(0, errorRecords.Count - 10)).ToList();
             recentSlice.Reverse();
-            var recentErrors = recentSlice
-                .Select(r => new { ts = r.Ts, skill = r.Skill, errorCode = r.ErrorCode, mode = r.Mode })
-                .ToArray();
+            var recentErrors = recentSlice.Select(BuildRecentErrorEntry).ToArray();
 
             var response = new
             {
@@ -864,7 +1068,33 @@ namespace UnitySkills
                 byAgent,
                 recentErrors,
             };
-            return JsonConvert.SerializeObject(response, SkillsCommon.JsonSettings);
+            string json = JsonConvert.SerializeObject(response, SkillsCommon.JsonSettings);
+            if (agentFilter == null) return json;
+
+            // Filtered reports echo the canonical filter right after "window"; unfiltered output keeps its exact shape.
+            var echoed = JObject.Parse(json);
+            echoed.Property("window").AddAfterSelf(new JProperty("agent", agentFilter));
+            return JsonConvert.SerializeObject(echoed, SkillsCommon.JsonSettings);
+        }
+
+        /// <summary>Label used for an agent in byAgent and in the agent filter: missing agents are "(unknown)".</summary>
+        private static string AgentLabel(string agent) => string.IsNullOrEmpty(agent) ? "(unknown)" : agent;
+
+        /// <summary>
+        /// One recentErrors entry. err and target are added only when present, so older lines produce the same shape.
+        /// </summary>
+        private static JObject BuildRecentErrorEntry(TelemetryRecord r)
+        {
+            var entry = new JObject
+            {
+                ["ts"] = r.Ts,
+                ["skill"] = r.Skill,
+                ["errorCode"] = r.ErrorCode,
+                ["mode"] = r.Mode,
+            };
+            if (!string.IsNullOrEmpty(r.Err)) entry["err"] = r.Err;
+            if (!string.IsNullOrEmpty(r.Target)) entry["target"] = r.Target;
+            return entry;
         }
 
         private static object BuildEmptyAnalytics(string window, bool enabled) => new
@@ -904,9 +1134,10 @@ namespace UnitySkills
             }
         }
 
-        private static DateTime WindowCutoffUtc(string window)
+        private static DateTime WindowCutoffUtc(string window) => WindowCutoffUtc(window, DateTime.UtcNow);
+
+        private static DateTime WindowCutoffUtc(string window, DateTime now)
         {
-            var now = DateTime.UtcNow;
             switch (window)
             {
                 case "1h": return now.AddHours(-1);

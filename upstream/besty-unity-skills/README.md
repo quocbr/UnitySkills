@@ -1,12 +1,12 @@
 # 🎮 UnitySkills
 
 <p align="center">
-  <img src="docs/Unity-Skills-H.png" alt="Unity-Skills" width="800">
+  <img src="docs/images/Unity-Skills-H.png" alt="Unity-Skills" width="800">
 </p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/Unity-2022.3%2B-black?style=for-the-badge&logo=unity" alt="Unity">
-  <img src="https://img.shields.io/badge/Skills-839-green?style=for-the-badge" alt="Skills">
+  <img src="https://img.shields.io/badge/Skills-873-green?style=for-the-badge" alt="Skills">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-orange?style=for-the-badge" alt="License"></a>
   <a href="README_CN.md"><img src="https://img.shields.io/badge/README-中文-blue?style=for-the-badge" alt="中文"></a>
 </p>
@@ -58,7 +58,7 @@ This project is a deep refactoring and feature extension based on the excellent 
 
 ## 🚀 Core Features
 
-- 🛠️ **839 REST Skills Toolkit**: 56 source files across 54 categories, plus 29 advisory design modules, with Batch operations.
+- 🛠️ **873 REST Skills Toolkit**: 57 source files across 55 categories, plus 30 advisory design modules, with Batch operations.
 - ⚡ **UnityCLI Support**: Bind UnityCLI to cold-start the bound project — no need to launch Unity Hub.
 - 🔐 **Three-Tier Permission Modes**: Approval / Auto / Bypass with dual approval channels, aligned with Claude Code permission modes.
 - 🤖 **6 Major IDEs Native Support**: Claude Code / Antigravity / Codex / Cursor / OpenCode / Kimi Code — one-click install and use.
@@ -106,7 +106,7 @@ UnitySkills ships with a true server-side permission system aligned with Claude 
 
 Upgrading users are detected automatically and stay on **Bypass**, preserving the previous Full-Auto behavior with no action required. Dual approval channels (Dialog / Panel), the audit log (`Library/UnitySkillsAudit.jsonl`), Allowlist and installer details → [Operating Modes & Governance](docs/OPERATING_MODES.md).
 
-> 29 advisory design modules (architecture, performance, design patterns, testability, package-specific source rules, etc.) are available in all modes and loaded on demand.
+> 30 advisory design modules (architecture, performance, design patterns, testability, package-specific source rules, etc.) are available in all modes and loaded on demand.
 
 ---
 
@@ -130,7 +130,7 @@ This project has been deeply optimized for the following environments (tools not
 > **Overview**: Install Unity Plugin → Start UnitySkills Server → AI Uses Skills
 
 <p align="center">
-  <img src="docs/installation-demo.gif" alt="一键安装演示" width="800">
+  <img src="docs/images/installation-demo.gif" alt="一键安装演示" width="800">
 </p>
 
 ### 1. Install Unity Plugin
@@ -160,7 +160,7 @@ In Unity, open menu: `Window > UnitySkills` (or press <kbd>Alt</kbd>+<kbd>Shift<
 
 ### 3. One-Click AI Skills Configuration
 1. Open `Window > UnitySkills` and go to the **AI Config** tab.
-2. Select the corresponding terminal icon and click **"Install"** — the installer copies the `unity-skills~/` template from the package to the target location, no manual copying needed.
+2. Select the corresponding terminal icon and click **"Install"** — the installer copies the `unity-skills~/` template from the package to the target location, plus the `unity-skills-eval~/` evaluation skill into a sibling `unity-skills-eval/` folder (invoke it with `/unity-skills-eval`); no manual copying needed. A Custom Path install writes only the main skill.
 
 > 🔄 **Auto-sync on update**: after you upgrade the package, tools you already installed are refreshed to the new version automatically (nothing new is ever installed for you); turn it off in ⚙ Settings ▸ **AI Tools**.
 >
@@ -179,7 +179,7 @@ If one-click installation is not supported or preferred, follow this **standard 
 #### ✅ Standard Installation Method B
 1. **Locate Skills Source Directory**: The `SkillsForUnity/unity-skills~/` directory in the UPM package is the distributable Skills template (root directory contains `SKILL.md`).
 2. **Find the Tool's Skills Root Directory**: Different tools have different paths; refer to the tool's documentation first.
-3. **Copy Completely**: Copy the entire contents of `unity-skills~/` to the tool's Skills root directory (rename to `unity-skills/`).
+3. **Copy Completely**: Copy the entire contents of `unity-skills~/` to the tool's Skills root directory (rename to `unity-skills/`). Optionally copy `unity-skills-eval~/` beside it as `unity-skills-eval/` to get the `/unity-skills-eval` evaluation skill.
 4. **Create agent_config.json**: Create an `agent_config.json` file in the `unity-skills/scripts/` directory:
    ```json
    {"agentId": "your-agent-name", "installedAt": "2026-02-11T00:00:00Z"}
@@ -212,14 +212,14 @@ If you're using other tools that support Skills, install according to the Skills
 ---
 
 <details>
-<summary><b>📦 Skills Category Overview (839)</b></summary>
+<summary><b>📦 Skills Category Overview (873)</b></summary>
 
 | Category | Count | Core Functions |
 | :--- | :---: | :--- |
 | **YooAsset** | 40 | Hot-update bundle builds/Collector full CRUD/BuildReport asset and dependency analysis/PlayMode runtime validation/Reporter-Debugger-AssetArtScanner tools |
 | **Behavior** | 10 | Unity Behavior graph assets/agents/blackboard variables (com.unity.behavior, reflection-based) |
 | **HybridCLR** | 12 | HybridCLR hot-update settings/codegen/DLL compile & copy pipeline (com.code-philosophy.hybridclr, reflection-based) |
-| **Workflow** | 40 | Persistent history/Tiered task snapshots/Content-addressed file store/Auto-clean/Session-level undo/Rollback/Clear history/Bookmarks/Batch query-preview-execute jobs |
+| **Workflow** | 42 | Persistent history/Tiered task snapshots/Content-addressed file store/Auto-clean/Session-level undo/Rollback/Clear history/Bookmarks/Batch query-preview-execute jobs |
 | **Cinemachine** | 34 | 2.x/3.x dual version auto-install/MixingCamera/ClearShot/TargetGroup/Spline |
 | **Netcode** | 39 | Netcode for GameObjects setup/prefabs/lifecycle/host-server-client workflows/NGO 2.5+ attachable & component-controller helpers |
 | **UI** | 29 | Canvas/Button/Text/InputField/Dropdown/ScrollView/Layout/Alignment/Image and selectable utilities |
@@ -257,6 +257,7 @@ If you're using other tools that support Skills, install according to the Skills
 | **Debug** | 11 | Error logs/Compile check/Stack trace/Assemblies/Define symbols/Memory info/Editor health diagnose |
 | **Event** | 11 | UnityEvent listener management/Batch add/Copy/State control/List |
 | **Light** | 11 | Light create/Type config/Intensity-Color/Batch toggle/Probe groups/Reflection probes/Lightmaps |
+| **Particle** | 31 | Built-in ParticleSystem (Shuriken) create/inspect/configure: typed module patches, renderer, bursts, sub emitters, static analysis, playback control (play/pause/stop/simulate/emit), atomic batches, dryRun and sliced simulation jobs (not VFX Graph) |
 | **Model** | 10 | Model import settings/Mesh info/Material mapping/Animation/Skeleton/Batch |
 | **NavMesh** | 10 | Bake/Path calculation/Agent/Obstacle/Sampling/Area cost |
 | **Optimization** | 10 | Texture compression/Mesh compression/Audio compression/Scene analysis/Static flags/LOD/Duplicate materials/Overdraw |
@@ -266,16 +267,36 @@ If you're using other tools that support Skills, install according to the Skills
 | **Smart** | 10 | Scene SQL query/Spatial query/Auto layout/Snap to ground/Grid snap/Randomize/Replace |
 | **Terrain** | 10 | Terrain create/Heightmap/Perlin noise/Smooth/Flatten/Texture painting |
 | **Texture** | 10 | Texture import settings/Platform settings/Sprite/Type/Size search/Batch |
-| **Project** | 10 | Player builds/Render pipeline/Build settings/Package management/Layer/Tag/PlayerSettings/Quality |
+| **Project** | 11 | Player builds/Render pipeline/Build settings/Package management/Layer/Tag/PlayerSettings/Quality |
 | **Addressables** | 8 | Addressable asset groups/Profiles/Labels/Build paths/Build/Entry add-remove (com.unity.addressables, reflection-based) |
 | **QFramework** | 20 | QFramework architecture-layer codegen/ViewController & UIKit panel codegen/UIKit settings/ResKit AssetBundle mark-build-clear/architecture scan/API doc query (no UPM package, reflection-based) |
 | **Sample** | 8 | Basic examples: Create/Delete/Transform/Scene info |
 
 > ⚠️ Most modules support `*_batch` batch operations. When operating on multiple objects, prioritize batch Skills for better performance.
 >
-> 🧠 `unity-skills/skills/` also includes **29 advisory design modules** for architecture, script design, performance, maintainability, Inspector guidance, and package-specific source rules.
+> 🧠 `unity-skills/skills/` also includes **30 advisory design modules** for architecture, script design, performance, maintainability, Inspector guidance, and package-specific source rules.
 
 </details>
+
+---
+
+## 🧪 Evaluation Set
+
+A scored evaluation set (pack 1.2.0, 41 tasks) lets you test how well your AI agent drives UnitySkills on your own Unity project. Tasks live in [`SkillsForUnity/Evaluation~/pack/`](SkillsForUnity/Evaluation~/pack/): `manifest.json` plus `tasks/<ID>/{prompt.en.md, prompt.zh-CN.md, task.py}`. The scoring assertions are private and are not shipped with the package.
+
+| Track | Basic | Standard | Challenge |
+|-------|-------|----------|-----------|
+| **ops** (editor operations) | 6: S01 S03 S04 S06 S08 D01 | 7: T3 T4 T5 T7 T10 OS1 OS2 | 8: OC1–OC8 |
+| **dev** (development work) | 6: DB1–DB6 | 6: T1 T2 T9 DS1 DS2 DS3 | 8: DC1–DC8 |
+
+**Run it**: open the **Evaluation** tab in the UnitySkills window (pick tasks → copy the prompt to your agent → watch progress → read results), or tell your agent `/unity-skills-eval`. The copied prompt carries the full runner command for your install (bundled `Evaluation~/run_eval.py`, Python 3.9+, standard library only).
+
+**Prerequisites**:
+- Operating mode `Bypass`.
+- All 41 tasks run on URP; 12 of them (S01 S03 S04 S06 S08 D01 DB1–DB6) also run on Built-in. The other 29 are URP-only and need an empty project marked as dedicated in the Evaluation tab.
+- DB5, DC5, OC5, OS2 and T2 need `com.unity.ugui`.
+
+Each task temporarily adds assets under `Assets/__UnitySkillsEval/` and the runner restores your scenes afterwards. Reports are written to `Library/UnitySkills/eval/sessions/<sessionId>/report.json` and `report.md`; the grade follows the strict pass rate (≥90% excellent, ≥70% good, ≥50% pass).
 
 ---
 
@@ -289,19 +310,22 @@ If you're using other tools that support Skills, install according to the Skills
 │   │   ├── SKILL.md                # Main Skill Definitions (AI-readable)
 │   │   ├── scripts/
 │   │   │   └── unity_skills.py     # Python Client Library
-│   │   ├── skills/                 # 83 module docs (54 REST/module docs + 29 documentation-only docs)
+│   │   ├── skills/                 # 85 module docs (55 REST/module docs + 30 documentation-only docs)
 │   │   └── references/             # Unity Development References
+│   ├── unity-skills-eval~/         # /unity-skills-eval evaluation skill, installed beside unity-skills
+│   │   └── SKILL.md
+│   ├── Evaluation~/                # Evaluation set: run_eval.py runner, usk_eval/, pack/ (manifest + 41 tasks)
 │   └── Editor/
 │       ├── Locales/                # Decoupled JSON Localization Assets (en.json, zh-CN.json, ru.json)
-│       ├── Skills/                 # Core Skill Logic (56 *Skills.cs files → 54 SkillCategory categories, 839 Skills)
+│       ├── Skills/                 # Core Skill Logic (57 *Skills.cs files → 55 SkillCategory categories, 873 Skills)
 │       │   ├── SkillsHttpServer.cs # HTTP Server Core (Producer-Consumer)
 │       │   ├── SkillRouter.cs      # Request Routing & Reflection-based Skill Discovery
 │       │   ├── WorkflowManager.cs  # Persistent Workflow (Task/Session/Snapshot)
 │       │   ├── RegistryService.cs  # Global Registry (Multi-instance Discovery)
-│       │   ├── GameObjectFinder.cs # Unified GO Finder (name/instanceId/path)
+│       │   ├── GameObjectFinder.cs # Unified GO Finder (name/entityId/instanceId/path)
 │       │   ├── BatchExecutor.cs    # Generic Batch Processing Framework
 │       │   ├── Localization.cs     # Multi-Language Localization Engine
-│       │   └── ...                 # 839 Skills source code
+│       │   └── ...                 # 873 Skills source code
 │       └── UI/                     # UI Toolkit Windows & Controllers
 │           ├── UnitySkillsWindow.{cs,uxml,uss} # Main Dashboard Window
 │           ├── UnityCliWindow.{cs,uxml,uss}    # Unity CLI Configuration Panel
@@ -309,7 +333,10 @@ If you're using other tools that support Skills, install according to the Skills
 │           ├── Controllers/                    # UI Tab & Widget Controllers
 │           └── Tabs/                           # UXML Tab Layouts & Settings Drawer
 ├── docs/
-│   └── SETUP_GUIDE.md              # Complete Setup & Usage Guide
+│   ├── SETUP_GUIDE.md              # Complete Setup & Usage Guide (_CN version available)
+│   ├── OPERATING_MODES.md          # Operating Modes & Governance (_CN version available)
+│   ├── images/                     # README images
+│   └── sponsors/                   # Sponsor logos
 ├── CHANGELOG.md                    # Version Update Log
 └── LICENSE                         # MIT License
 ```

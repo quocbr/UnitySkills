@@ -1,12 +1,12 @@
 # 🎮 UnitySkills
 
 <p align="center">
-  <img src="docs/Unity-Skills-H.png" alt="Unity-Skills" width="800">
+  <img src="docs/images/Unity-Skills-H.png" alt="Unity-Skills" width="800">
 </p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/Unity-2022.3%2B-black?style=for-the-badge&logo=unity" alt="Unity">
-  <img src="https://img.shields.io/badge/Skills-839-green?style=for-the-badge" alt="Skills">
+  <img src="https://img.shields.io/badge/Skills-873-green?style=for-the-badge" alt="Skills">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-orange?style=for-the-badge" alt="License"></a>
   <a href="README.md"><img src="https://img.shields.io/badge/README-English-blue?style=for-the-badge" alt="English"></a>
 </p>
@@ -58,7 +58,7 @@
 
 ## 🚀 核心特性
 
-- 🛠️ **839 REST Skills 全能库**：56 个源文件、54 个分类，另有 29 个 advisory 设计模块，支持 Batch 批处理。
+- 🛠️ **873 REST Skills 全能库**：57 个源文件、55 个分类，另有 30 个 advisory 设计模块，支持 Batch 批处理。
 - ⚡ **支持UnityCLI**：支持绑定UnityCLI，对应项目冷启动，不用开启UnityHub
 - 🔐 **三档权限模式**：Approval / Auto / Bypass + 双轨审批，对齐 Claude Code permission modes。
 - 🤖 **6 大 IDE 原生支持**：Claude Code / Antigravity / Codex / Cursor / OpenCode / Kimi Code，一键安装即用。
@@ -106,7 +106,7 @@ UnitySkills 引入真正的服务端权限系统，对齐 Claude Code permission
 
 老用户升级自动识别旧安装并保持 **Bypass**，行为与原 Full-Auto 完全一致，无需任何操作。双轨审批（Dialog / Panel）、审计日志（`Library/UnitySkillsAudit.jsonl`）、Allowlist 与卸载按钮等完整说明 → [操作模式与治理层](docs/OPERATING_MODES_CN.md)。
 
-> 29 个 advisory 设计模块（架构、性能、设计模式、可测试性、包级源码规则等）在所有模式下均可用，按需自动加载。
+> 30 个 advisory 设计模块（架构、性能、设计模式、可测试性、包级源码规则等）在所有模式下均可用，按需自动加载。
 
 ---
 
@@ -130,7 +130,7 @@ UnitySkills 引入真正的服务端权限系统，对齐 Claude Code permission
 > **总体路线**：安装 Unity 插件 → 开启 UnitySkills 服务器 → AI 使用 Skill
 
 <p align="center">
-  <img src="docs/installation-demo.gif" alt="一键安装演示" width="800">
+  <img src="docs/images/installation-demo.gif" alt="一键安装演示" width="800">
 </p>
 
 ### 1. 安装 Unity 插件
@@ -160,7 +160,7 @@ https://github.com/Besty0728/Unity-Skills.git?path=/SkillsForUnity#v1.6.0
 
 ### 3. 一键配置 AI Skills
 1. 打开 `Window > UnitySkills`，切到 **AI Config** 标签页。
-2. 选择对应的终端图标，点击 **"Install"** 即完成配置——安装器会把包内 `unity-skills~/` 模板复制到目标位置，无需手动拷贝。
+2. 选择对应的终端图标，点击 **"Install"** 即完成配置——安装器会把包内 `unity-skills~/` 模板复制到目标位置，并把评测技能 `unity-skills-eval~/` 装到旁边的 `unity-skills-eval/` 目录（用 `/unity-skills-eval` 调用），无需手动拷贝。Custom Path 安装只装主技能。
 
 > 🔄 **更新自动同步**：升级插件后，已安装过的 AI 工具会自动同步到新版本（不会自动安装新目标）；可在 ⚙ 设置抽屉的 **AI 工具** 区关闭。
 >
@@ -179,7 +179,7 @@ https://github.com/Besty0728/Unity-Skills.git?path=/SkillsForUnity#v1.6.0
 #### ✅ 标准安装规范 B
 1. **定位 Skills 源码目录**：UPM 包内的 `SkillsForUnity/unity-skills~/` 即为可分发的 Skills 模板（根目录包含 `SKILL.md`）。
 2. **找到工具的 Skills 根目录**：不同工具路径不同，优先以该工具文档为准。
-3. **完整复制**：将整个 `unity-skills~/` 目录内容复制到工具的 Skills 根目录下（重命名为 `unity-skills/`）。
+3. **完整复制**：将整个 `unity-skills~/` 目录内容复制到工具的 Skills 根目录下（重命名为 `unity-skills/`）。如需评测技能 `/unity-skills-eval`，再把 `unity-skills-eval~/` 复制到旁边并命名为 `unity-skills-eval/`。
 4. **创建 agent_config.json**：在 `unity-skills/scripts/` 目录下创建 `agent_config.json` 文件：
    ```json
    {"agentId": "your-agent-name", "installedAt": "2026-02-11T00:00:00Z"}
@@ -212,14 +212,14 @@ https://github.com/Besty0728/Unity-Skills.git?path=/SkillsForUnity#v1.6.0
 ---
 
 <details>
-<summary><b>📦 Skills 分类概要 (839)</b></summary>
+<summary><b>📦 Skills 分类概要 (873)</b></summary>
 
 | 分类 | 数量 | 核心功能 |
 | :--- | :---: | :--- |
 | **YooAsset** | 40 | 热更新打包/Collector 完整 CRUD/BuildReport 资产与依赖分析/PlayMode 运行时验证/Reporter-Debugger-AssetArtScanner 工具 |
 | **Behavior** | 10 | Unity Behavior 行为图资产/Agent 组件/黑板变量（com.unity.behavior，反射实现） |
 | **HybridCLR** | 12 | HybridCLR 热更新设置/代码生成/DLL 编译与拷贝流水线（com.code-philosophy.hybridclr，反射实现） |
-| **Workflow** | 40 | 持久化历史/分级任务快照/内容寻址文件存储/自动清理/会话级撤销/回滚/清空历史/书签/批量查询预览执行作业 |
+| **Workflow** | 42 | 持久化历史/分级任务快照/内容寻址文件存储/自动清理/会话级撤销/回滚/清空历史/书签/批量查询预览执行作业 |
 | **Cinemachine** | 34 | 2.x/3.x双版本自动安装/混合相机/ClearShot/TargetGroup/Spline |
 | **Netcode** | 39 | Netcode for GameObjects 设置/预制体/生命周期/Host-Server-Client 工作流 /NGO 2.5+ 挂载与组件控制器 |
 | **UI** | 29 | Canvas/Button/Text/InputField/Dropdown/ScrollView/Layout/对齐/Image 与 Selectable 工具 |
@@ -257,6 +257,7 @@ https://github.com/Besty0728/Unity-Skills.git?path=/SkillsForUnity#v1.6.0
 | **Debug** | 11 | 错误日志/编译检查/堆栈/程序集/定义符号/内存信息/编辑器健康诊断 |
 | **Event** | 11 | UnityEvent监听器管理/批量添加/复制/状态控制/列举 |
 | **Light** | 11 | 灯光创建/类型配置/强度颜色/批量开关/探针组/反射探针/光照贴图 |
+| **Particle** | 31 | 内置粒子系统（Shuriken）创建/查询/配置：模块类型化补丁、渲染器、爆发、子发射器、静态诊断、播放控制（播放/暂停/停止/模拟/发射）、原子批处理、dryRun 和分片模拟任务（不含 VFX Graph） |
 | **Model** | 10 | 模型导入设置/Mesh信息/材质映射/动画/骨骼/批量 |
 | **NavMesh** | 10 | 烘焙/路径计算/Agent/Obstacle/采样/区域代价 |
 | **Optimization** | 10 | 纹理压缩/网格压缩/音频压缩/场景分析/静态标记/LOD/重复材质/过度绘制 |
@@ -266,16 +267,36 @@ https://github.com/Besty0728/Unity-Skills.git?path=/SkillsForUnity#v1.6.0
 | **Smart** | 10 | 场景SQL查询/空间查询/自动布局/对齐地面/网格吸附/随机化/替换 |
 | **Terrain** | 10 | 地形创建/高度图/Perlin噪声/平滑/平坦化/纹理绘制 |
 | **Texture** | 10 | 纹理导入设置/平台设置/Sprite/类型/尺寸查找/批量 |
-| **Project** | 10 | Player 出包/渲染管线/构建设置/包管理/Layer/Tag/PlayerSettings/质量 |
+| **Project** | 11 | Player 出包/渲染管线/构建设置/包管理/Layer/Tag/PlayerSettings/质量 |
 | **Addressables** | 8 | Addressable 资产组/Profiles/Labels/构建路径/构建/条目增删（com.unity.addressables，反射实现） |
 | **QFramework** | 20 | QFramework 架构层代码生成/ViewController 与 UIKit 面板代码生成/UIKit 设置/ResKit AssetBundle 标记-构建-清理/架构扫描/API 文档查询（无 UPM 包，反射实现） |
 | **Sample** | 8 | 基础示例：创建/删除/变换/场景信息 |
 
 > ⚠️ 大部分模块支持 `*_batch` 批量操作，操作多个物体时应优先使用批量 Skills 以提升性能。
 >
-> 🧠 `unity-skills/skills/` 目录下额外提供 **29 个 advisory 设计模块**，用于在脚本编写前辅助 AI 进行架构、性能、可维护性、Inspector 设计与包级源码规则决策。
+> 🧠 `unity-skills/skills/` 目录下额外提供 **30 个 advisory 设计模块**，用于在脚本编写前辅助 AI 进行架构、性能、可维护性、Inspector 设计与包级源码规则决策。
 
 </details>
+
+---
+
+## 🧪 评测集
+
+内置带评分的评测集（题库 1.2.0，共 41 题），可在你自己的 Unity 项目里检验 AI 智能体驱动 UnitySkills 的能力。题目位于 [`SkillsForUnity/Evaluation~/pack/`](SkillsForUnity/Evaluation~/pack/)：`manifest.json` 加 `tasks/<ID>/{prompt.en.md, prompt.zh-CN.md, task.py}`。评分用的断言为私有内容，不随包发布。
+
+| 赛道 | 基础 | 标准 | 挑战 |
+|------|------|------|------|
+| **ops 运维**（编辑器操作） | 6：S01 S03 S04 S06 S08 D01 | 7：T3 T4 T5 T7 T10 OS1 OS2 | 8：OC1–OC8 |
+| **dev 开发**（开发任务） | 6：DB1–DB6 | 6：T1 T2 T9 DS1 DS2 DS3 | 8：DC1–DC8 |
+
+**运行方式**：在 UnitySkills 窗口打开 **评测** 标签页（选题 → 把提示词复制给智能体 → 看进度 → 看结果），或对智能体说 `/unity-skills-eval`。复制出的提示词里带着运行器在你安装位置的完整命令（随包的 `Evaluation~/run_eval.py`，Python 3.9+，仅标准库）。
+
+**前置条件**：
+- 运行模式需为 `Bypass`。
+- 41 题都能在 URP 上跑，其中 12 题（S01 S03 S04 S06 S08 D01 DB1–DB6）也能在 Built-in 上跑；其余 29 题只支持 URP，且需要一个在评测页标记为专用的空工程。
+- DB5、DC5、OC5、OS2、T2 需要 `com.unity.ugui`。
+
+每道题会临时在 `Assets/__UnitySkillsEval/` 下添加资产，结束后运行器会还原你的场景。报告写入 `Library/UnitySkills/eval/sessions/<sessionId>/report.json` 与 `report.md`；等级按严格通过率评定（≥90% 优秀、≥70% 良好、≥50% 及格）。
 
 ---
 
@@ -289,19 +310,22 @@ https://github.com/Besty0728/Unity-Skills.git?path=/SkillsForUnity#v1.6.0
 │   │   ├── SKILL.md                # 主 Skill 定义 (AI 读取)
 │   │   ├── scripts/
 │   │   │   └── unity_skills.py     # Python 客户端库
-│   │   ├── skills/                 # 83 个模块文档（54 个 REST/模块文档 + 29 个 advisory 文档）
+│   │   ├── skills/                 # 85 个模块文档（55 个 REST/模块文档 + 30 个 advisory 文档）
 │   │   └── references/             # Unity 开发参考文档
+│   ├── unity-skills-eval~/         # /unity-skills-eval 评测技能，装在 unity-skills 旁边
+│   │   └── SKILL.md
+│   ├── Evaluation~/                # 评测集：run_eval.py 运行器、usk_eval/、pack/（manifest + 41 题）
 │   └── Editor/
 │       ├── Locales/                # 独立多语言 JSON 资产 (en.json, zh-CN.json, ru.json)
-│       ├── Skills/                 # 核心 Skill 逻辑 (56 个 *Skills.cs → 54 个 SkillCategory 分类，共 839 Skills)
+│       ├── Skills/                 # 核心 Skill 逻辑 (57 个 *Skills.cs → 55 个 SkillCategory 分类，共 873 Skills)
 │       │   ├── SkillsHttpServer.cs # HTTP 服务器核心 (Producer-Consumer)
 │       │   ├── SkillRouter.cs      # 请求路由 & 反射发现 Skills
 │       │   ├── WorkflowManager.cs  # 持久化工作流 (Task/Session/Snapshot)
 │       │   ├── RegistryService.cs  # 全局注册表 (多实例发现)
-│       │   ├── GameObjectFinder.cs # 统一 GO 查找器 (name/instanceId/path)
+│       │   ├── GameObjectFinder.cs # 统一 GO 查找器 (name/entityId/instanceId/path)
 │       │   ├── BatchExecutor.cs    # 泛型批处理框架
 │       │   ├── Localization.cs     # 多语言本地化管理引擎
-│       │   └── ...                 # 839 Skills 源码
+│       │   └── ...                 # 873 Skills 源码
 │       └── UI/                     # UI Toolkit 窗口与控制器
 │           ├── UnitySkillsWindow.{cs,uxml,uss} # 主控制面板窗口
 │           ├── UnityCliWindow.{cs,uxml,uss}    # Unity CLI 配置面板
@@ -309,7 +333,10 @@ https://github.com/Besty0728/Unity-Skills.git?path=/SkillsForUnity#v1.6.0
 │           ├── Controllers/                    # 页面与组件控制器
 │           └── Tabs/                           # UXML 页面结构与设置抽屉
 ├── docs/
-│   └── SETUP_GUIDE.md              # 完整安装使用指南
+│   ├── SETUP_GUIDE.md              # 完整安装使用指南（另有 _CN 版本）
+│   ├── OPERATING_MODES.md          # 操作模式与治理层（另有 _CN 版本）
+│   ├── images/                     # README 图片
+│   └── sponsors/                   # 赞助商图标
 ├── CHANGELOG.md                    # 版本更新记录
 └── LICENSE                         # MIT 开源协议
 ```

@@ -1,6 +1,6 @@
 {
   "name": "com.besty.unity-skills",
-  "version": "0.0.1",
+  "version": "3.0.0",
   "displayName": "UnitySkills Workbench",
   "description": "Unified Unity agent skills with Besty's Editor automation and Vietnamese UI localization.",
   "unity": "2022.3",

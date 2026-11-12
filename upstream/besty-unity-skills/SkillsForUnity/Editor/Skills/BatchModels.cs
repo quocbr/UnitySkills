@@ -7,6 +7,7 @@ namespace UnitySkills
     {
         public string name;
         public string namePattern;
+        public bool caseSensitive;
         public string path;
         public string entityId;
         public int instanceId;
@@ -17,6 +18,7 @@ namespace UnitySkills
         public string componentType;
         public string sceneName;
         public string parentPath;
+        public string underPath;
         public string prefabSource;
         public bool includeInactive;
         public int limit = 500;
@@ -63,6 +65,8 @@ namespace UnitySkills
         public int targetCount;
         public int executableCount;
         public int skipCount;
+        public int totalMatched;
+        public bool truncated;
     }
 
     internal class BatchFailureGroup
@@ -132,6 +136,7 @@ namespace UnitySkills
         public List<string> warnings = new List<string>();
         public string resultSummary;
         public string relatedWorkflowId;
+        public string agentId; // The batch_execute caller, folded like the workflow history's agents; its chunk tasks carry it
         public string reportId;
         public bool canCancel = true;
         public int chunkSize = 100;

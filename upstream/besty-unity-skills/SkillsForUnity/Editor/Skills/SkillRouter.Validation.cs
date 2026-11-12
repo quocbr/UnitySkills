@@ -16,7 +16,8 @@ namespace UnitySkills
         {
             var validation = new ParameterValidationResult
             {
-                Args = string.IsNullOrEmpty(json) ? new JObject() : JObject.Parse(json)
+                Args = string.IsNullOrEmpty(json) ? new JObject() : SkillsCommon.ParseObjectKeepingStrings(json),
+                RawJson = json
             };
 
             var ps = skill.Parameters;
@@ -92,7 +93,7 @@ namespace UnitySkills
 
         /// <summary>
         /// dryRun-time counterpart to the reserved-body-parameter parsing Execute performs just before invoking
-        /// the skill (verbose bool coercion; offset/limit/pageOffset/pageLimit integer + range checks): without
+        /// the skill (verbose bool coercion, _checkpoint string check, offset/limit/pageOffset/pageLimit integer + range checks): without
         /// this, POST /skill/xxx?mode=dryRun with e.g. <c>{"offset":"abc"}</c> reported valid:true, and the same
         /// body without ?mode=dryRun failed with TYPE_MISMATCH -- dryRun is supposed to preview exactly that
         /// failure, not miss it. Skipped whenever the skill itself declares a same-named parameter (its own
@@ -114,6 +115,17 @@ namespace UnitySkills
                     parameter = "verbose",
                     expectedType = "boolean",
                     error = $"Parameter 'verbose' must be a boolean (true/false), got: {verboseToken.ToString(Formatting.None)}"
+                });
+            }
+
+            if (args.TryGetValue(CheckpointParameterName, StringComparison.OrdinalIgnoreCase, out var checkpointToken) &&
+                checkpointToken.Type != JTokenType.String && checkpointToken.Type != JTokenType.Null)
+            {
+                validation.TypeErrors.Add(new
+                {
+                    parameter = CheckpointParameterName,
+                    expectedType = "string",
+                    error = $"Parameter '{CheckpointParameterName}' must be a string label, got: {checkpointToken.ToString(Formatting.None)}"
                 });
             }
 
@@ -171,6 +183,21 @@ namespace UnitySkills
             validation.MissingPackages.AddRange(missing);
         }
 
+        /// <summary>
+        /// Test seam: makes <see cref="NormalizeSyntheticEntityIdLocator"/> act as on Unity 6000.4+, where
+        /// <see cref="UnityObjectIdUtility.GetObjectId"/> is always 0, so its path and refusal branches run on every editor.
+        /// </summary>
+        internal static bool LegacyInstanceIdUnavailableForTests;
+
+        private const int MaxEntityIdCandidates = 10;
+
+        /// <summary>
+        /// A skill exposing the synthetic entityId reads only name/instanceId/path, so the entityId is forwarded through a
+        /// locator that names this one object: the legacy instanceId where this Unity version still has one, otherwise the
+        /// hierarchy path when it leads back to this object alone. Anything else is a semantic error listing the candidates;
+        /// a shared path or a bare name would hand the call to another same-name object. Runs inside ValidateParameters, so
+        /// Execute, DryRun and Plan all reach the same verdict.
+        /// </summary>
         private static void NormalizeSyntheticEntityIdLocator(SkillInfo skill, ParameterValidationResult validation)
         {
             if (!ShouldExposeSyntheticEntityId(skill) ||
@@ -181,7 +208,7 @@ namespace UnitySkills
             }
 
             var entityId = token.Type == JTokenType.Null ? null : token.ToString();
-            if (string.IsNullOrWhiteSpace(entityId))
+            if (!UnityObjectIdUtility.IsGivenEntityId(entityId))
                 return;
 
             var unityObject = UnityObjectIdUtility.EntityIdToObject(entityId);
@@ -202,27 +229,111 @@ namespace UnitySkills
                 return;
             }
 
-            if (TryInjectLocatorValue(validation.Args, skill.ParameterNames, _entityIdPathFallbackParameters, GameObjectFinder.GetCachedPath(gameObject)))
-                return;
-
-            TryInjectLocatorValue(validation.Args, skill.ParameterNames, _entityIdNameFallbackParameters, gameObject.name);
-        }
-
-        private static bool TryInjectLocatorValue(JObject args, string[] parameterNames, string[] candidates, string value)
-        {
-            if (string.IsNullOrWhiteSpace(value))
-                return false;
-
-            foreach (var candidate in candidates)
+            var instanceIdParameter = FindDeclaredParameter(skill, "instanceId");
+            var legacyId = LegacyInstanceIdUnavailableForTests ? 0 : UnityObjectIdUtility.GetObjectId(gameObject);
+            if (instanceIdParameter != null && legacyId != 0)
             {
-                if (!ContainsParameter(parameterNames, candidate))
-                    continue;
-
-                args[candidate] = value;
-                return true;
+                validation.Args[instanceIdParameter] = legacyId;
+                return;
             }
 
-            return false;
+            var path = GameObjectFinder.GetCachedPath(gameObject);
+            var pathParameter = _entityIdPathFallbackParameters
+                .Select(candidate => FindDeclaredParameter(skill, candidate))
+                .FirstOrDefault(declared => declared != null);
+            var pathMatches = pathParameter != null ? FindObjectsAtPath(path) : null;
+            if (pathMatches != null &&
+                pathMatches.Count == 1 && pathMatches[0] == gameObject &&
+                GameObjectFinder.FindByPath(path) == gameObject)
+            {
+                validation.Args[pathParameter] = path;
+                return;
+            }
+
+            validation.SemanticErrors.Add(BuildUnforwardableEntityIdError(skill, entityId, gameObject, path, pathMatches));
+        }
+
+        private static string FindDeclaredParameter(SkillInfo skill, string parameterName) =>
+            skill.ParameterNames?.FirstOrDefault(name => string.Equals(name, parameterName, StringComparison.OrdinalIgnoreCase));
+
+        /// <summary>
+        /// Every scene object a path lookup for <paramref name="path"/> could land on: its hierarchy path, bare or prefixed
+        /// with its scene name (FindByPath accepts both), equals the path case-insensitively.
+        /// </summary>
+        private static List<GameObject> FindObjectsAtPath(string path)
+        {
+            var matches = new List<GameObject>();
+            var key = GameObjectFinder.NormalizePathKey(path);
+            if (key == null)
+                return matches;
+
+            foreach (var candidate in GameObjectFinder.GetSceneObjects())
+            {
+                if (candidate == null)
+                    continue;
+
+                var candidatePath = GameObjectFinder.GetCachedPath(candidate);
+                var sceneName = candidate.scene.name;
+                if (PathKeyEquals(candidatePath, key) ||
+                    (!string.IsNullOrEmpty(sceneName) && PathKeyEquals(sceneName + "/" + candidatePath, key)))
+                    matches.Add(candidate);
+            }
+
+            return matches;
+        }
+
+        private static bool PathKeyEquals(string path, string normalizedKey) =>
+            string.Equals(GameObjectFinder.NormalizePathKey(path), normalizedKey, StringComparison.OrdinalIgnoreCase);
+
+        /// <summary><paramref name="pathMatches"/> is null when the skill has no path parameter.</summary>
+        private static object BuildUnforwardableEntityIdError(SkillInfo skill, string entityId, GameObject target, string path,
+            List<GameObject> pathMatches)
+        {
+            string reason;
+            string error;
+            List<GameObject> candidates;
+            if (pathMatches == null)
+            {
+                reason = "noPathParameter";
+                candidates = GameObjectFinder.GetSceneObjects()
+                    .Where(go => go != null && string.Equals(go.name, target.name, StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+                error = $"entityId {entityId} ('{path}') cannot be passed to {skill.Name}: it locates objects by name or instanceId only, " +
+                        "this Unity version has no legacy instanceId, and entityId is never forwarded as a name. " +
+                        "Pass name yourself only if candidates lists a single object.";
+            }
+            else if (pathMatches.Count > 1)
+            {
+                reason = "ambiguousPath";
+                candidates = pathMatches;
+                error = $"entityId {entityId} resolves to '{path}', a path {pathMatches.Count} objects share, and this Unity version has no " +
+                        $"legacy instanceId, so {skill.Name} cannot be pointed at it alone. Rename or move it so its path is unique " +
+                        "(gameobject_rename takes entityId), then retry.";
+            }
+            else
+            {
+                reason = "pathUnresolvable";
+                candidates = pathMatches;
+                error = $"entityId {entityId} names '{path}', but a path lookup does not lead back to it (it is not in an open scene, " +
+                        $"or its name breaks the path syntax), and this Unity version has no legacy instanceId, so {skill.Name} cannot target it.";
+            }
+
+            return new
+            {
+                // Same two keys as the not-found entry above, for the same reason.
+                field = EntityIdParameterName,
+                parameter = EntityIdParameterName,
+                error,
+                reason,
+                path,
+                candidates = candidates.Take(MaxEntityIdCandidates).Select(go => new
+                {
+                    name = go.name,
+                    path = GameObjectFinder.GetCachedPath(go),
+                    scene = go.scene.name,
+                    entityId = UnityObjectIdUtility.GetEntityId(go)
+                }).ToArray()
+            };
         }
 
         private static void CollectUnknownParameters(SkillInfo skill, ParameterValidationResult validation)

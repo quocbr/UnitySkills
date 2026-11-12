@@ -213,16 +213,139 @@ namespace UnitySkills
         [UnitySkill("workflow_task_start", "Start a new persistent workflow task to track changes for undo. Call workflow_task_end when done.",
             Category = SkillCategory.Workflow, Operation = SkillOperation.Execute,
             Tags = new[] { "task", "undo", "tracking", "transaction" },
-            Outputs = new[] { "taskId", "message" },
+            Outputs = new[] { "taskId", "checkpoint", "message" },
             RequiresInput = new[] { "tag" })]
         public static object WorkflowTaskStart(string tag, string description = "")
         {
             var task = WorkflowManager.BeginTask(tag, description);
+            string checkpoint = WorkflowManager.AddCheckpoint(null, WorkflowCheckpoint.KindTask, tag);
             return new
             {
                 success = true,
                 taskId = task.id,
+                checkpoint,
                 message = $"Started task: {tag}"
+            };
+        }
+
+        [UnitySkill("workflow_checkpoint", "Name a point in the undo history. Without 'at' it adds a checkpoint before the caller's next recorded step; with 'at' (a c<n> id from workflow_list) it renames that checkpoint. Undo back to it later with its id or label.",
+            Category = SkillCategory.Workflow, Operation = SkillOperation.Create,
+            Tags = new[] { "checkpoint", "undo", "label" },
+            Outputs = new[] { "id", "label" },
+            RiskLevel = "low",
+            RequiresInput = new[] { "label" })]
+        public static object WorkflowCheckpointMark(string label, string at = null)
+        {
+            if (Validate.Required(label, "label") is object err) return err;
+            return string.IsNullOrEmpty(at) ? AddLabelledCheckpoint(label) : RenameCheckpoint(at, label);
+        }
+
+        private static object AddLabelledCheckpoint(string label) =>
+            new { id = WorkflowManager.AddCheckpoint(null, WorkflowCheckpoint.KindExplicit, label), label };
+
+        private static object RenameCheckpoint(string id, string label)
+        {
+            if (!WorkflowManager.RenameCheckpoint(id, label))
+                return new
+                {
+                    error = $"Checkpoint not found: {id}. Use a c<n> id from workflow_list.",
+                    errorCode = SkillErrorCode.NotFound.ToWireString(),
+                    retryStrategy = SkillErrorResponse.RetryFixAndRetry
+                };
+            return new { id, label };
+        }
+
+        [UnitySkill("workflow_restore", "Restore the scene and project assets to a checkpoint. to is a c<n> id, an s<n> step, 'last' (the caller's newest checkpoint) or a checkpoint label; agents is 'self' (default) or 'all'; conflicts: omit to refuse on conflicts (WORKFLOW_CONFLICT lists them), \"keep\" to skip them, or the ids to overwrite. A guard checkpoint is taken first, so the restore is undone with workflow_restore {\"to\":\"<guard>\"}. scope limits the restore to some targets: comma-separated entity:<id>, object names or paths (trailing / adds children), Assets/ paths (trailing / = folder), setting keys (trailing . = prefix).",
+            Category = SkillCategory.Workflow, Operation = SkillOperation.Execute,
+            Tags = new[] { "workflow", "restore", "undo", "checkpoint" },
+            Outputs = new[] { "to", "guard", "restored", "deleted", "recreated", "failed", "skipped", "coverage", "undo", "compileTriggered" },
+            RequiresInput = new[] { "to" },
+            RiskLevel = "medium", MutatesScene = true, MutatesAssets = true)]
+        public static object WorkflowRestore(string to, string agents = "self", string conflicts = null, string scope = null)
+        {
+            if (Validate.Required(to, "to") is object err) return err;
+            bool allAgents;
+            if (string.Equals(agents, "all", StringComparison.OrdinalIgnoreCase)) allAgents = true;
+            else if (string.IsNullOrEmpty(agents) || string.Equals(agents, "self", StringComparison.OrdinalIgnoreCase)) allAgents = false;
+            else return new { error = $"agents must be 'self' or 'all', got '{agents}'", errorCode = SkillErrorCode.SemanticInvalid.ToWireString() };
+
+            string caller = WorkflowManager.ResolveCallerAgent();
+            var withdrawn = SurfaceRejectionForTasks("workflow_restore", "restoring these steps' snapshots",
+                WorkflowManager.FindStepsForRestore(to, allAgents, caller));
+            if (withdrawn != null)
+                return withdrawn;
+
+            var outcome = WorkflowManager.RestoreTo(to, allAgents, caller, conflicts, scope);
+            return outcome.error != null ? RestoreError(outcome) : RestoreResponse(outcome, to);
+        }
+
+        /// <summary>
+        /// The success response of a restore. A compile it triggered is reported as an async job the caller can wait on.
+        /// </summary>
+        private static Dictionary<string, object> RestoreResponse(RestoreOutcome outcome, string to)
+        {
+            var result = new Dictionary<string, object>
+            {
+                ["to"] = to,
+                ["guard"] = outcome.guard,
+                ["restored"] = outcome.restored,
+                ["deleted"] = outcome.deleted,
+                ["recreated"] = outcome.recreated,
+                ["failed"] = outcome.failed,
+                ["skipped"] = outcome.skipped,
+                ["coverage"] = outcome.coverage,
+                ["undo"] = outcome.guard == null ? null : $"workflow_restore {{\"to\":\"{outcome.guard}\"}}",
+                ["compileTriggered"] = outcome.compileTriggered
+            };
+            if (outcome.merged > 0)
+                result["merged"] = outcome.merged;
+            if (outcome.failedItems.Count > 0)
+                result["failedItems"] = outcome.failedItems;
+            if (outcome.skippedItems.Count > 0)
+                result["skippedItems"] = outcome.skippedItems;
+            if (!outcome.compileTriggered)
+                return result;
+
+            var job = AsyncJobService.StartRefreshCompileJob(outcome.scriptChanges, outcome.refreshStartedUtcTicks,
+                compilationStartsBefore: outcome.compilationStartsBefore);
+            result["status"] = "accepted";
+            result["jobId"] = job.jobId;
+            result["waitUrl"] = AsyncJobService.BuildWaitUrl(job.jobId);
+            ServerAvailabilityHelper.AttachTransientUnavailableNotice(
+                result,
+                "The restore may trigger a short asset refresh window. The REST server can be briefly unavailable if Unity starts recompiling scripts.",
+                alwaysInclude: true);
+            return result;
+        }
+
+        // The router keeps a skill error's top-level members but not its details object, so a conflict's list and coverage sit at the top.
+        private static object RestoreError(RestoreOutcome outcome)
+        {
+            if (outcome.errorCode == SkillErrorCode.WorkflowConflict)
+            {
+                return new
+                {
+                    error = outcome.error,
+                    errorCode = outcome.errorCode.ToWireString(),
+                    conflicts = outcome.conflicts,
+                    coverage = outcome.coverage,
+                    suggestedFixes = new[]
+                    {
+                        new SuggestedFix
+                        {
+                            action = "ask_user",
+                            reason = "Ask the user which conflicting changes to keep. Then retry with conflicts:\"keep\" or with the ids to overwrite."
+                        }
+                    },
+                    retryStrategy = SkillErrorResponse.RetryFixAndRetry
+                };
+            }
+            return new
+            {
+                error = outcome.error,
+                errorCode = outcome.errorCode.ToWireString(),
+                recentCheckpoints = outcome.recentCheckpoints,
+                retryStrategy = SkillErrorResponse.RetryFixAndRetry
             };
         }
 
@@ -274,108 +397,258 @@ namespace UnitySkills
             return new { success = true, objectName = target.name, type = target.GetType().Name };
         }
 
-        [UnitySkill("workflow_list", "List persistent workflow history",
+        private const int DefaultWorkflowListRows = 30;
+        private const int MaxWorkflowListRows = 200;
+
+        [UnitySkill("workflow_list", "List recorded workflow steps and checkpoints newest first as compact rows ('s<seq> time skill target (changes) [@agent] [(undone)]', 'c<n> time \"label\"|auto [@agent]'); pass a row's s<seq> or c<n> id to workflow_undo_task or workflow_checkpoint. Params: limit (default 30, counts all rows), agent ('all', 'self' or an agent id), before (an s<seq> or c<n> id, for the next page), view ('all' default, or 'checkpoints' for one row per checkpoint with the steps it covers), format ('objects' returns the legacy object list).",
             Category = SkillCategory.Workflow, Operation = SkillOperation.Query,
-            Tags = new[] { "workflow", "history", "list", "task" },
-            Outputs = new[] { "count", "history" },
+            Tags = new[] { "workflow", "history", "list", "task", "checkpoint" },
+            Outputs = new[] { "count", "agent", "rows", "more", "history" },
             ReadOnly = true,
             Mode = SkillMode.SemiAuto)]
-        public static object WorkflowList()
+        public static object WorkflowList(int limit = 0, string agent = "all", string before = null, string format = "rows", string view = "all")
         {
-            var history = WorkflowManager.History;
-            var list = history.tasks.Select(t => new
-            {
-                id = t.id,
-                tag = t.tag,
-                description = t.description,
-                time = t.GetFormattedTime(),
-                changes = t.snapshots.Count
-            }).ToList<object>(); // Converted to an object list for JSON serialization
+            bool objects = string.Equals(format, "objects", StringComparison.OrdinalIgnoreCase);
+            if (!objects && !string.IsNullOrEmpty(format) && !string.Equals(format, "rows", StringComparison.OrdinalIgnoreCase))
+                return InvalidListArgument($"format must be 'rows' or 'objects', got '{format}'");
+            bool checkpointsOnly = string.Equals(view, "checkpoints", StringComparison.OrdinalIgnoreCase);
+            if (!checkpointsOnly && !string.IsNullOrEmpty(view) && !string.Equals(view, "all", StringComparison.OrdinalIgnoreCase))
+                return InvalidListArgument($"view must be 'all' or 'checkpoints', got '{view}'");
+            if (limit < 0 || limit > MaxWorkflowListRows)
+                return InvalidListArgument($"limit must be between 1 and {MaxWorkflowListRows} (0 = default)");
 
-            return new { success = true, count = list.Count, history = list };
+            long cutoff = long.MaxValue;
+            if (!string.IsNullOrEmpty(before) && !TryParseListCursor(before, out cutoff))
+                return InvalidListArgument($"before must be an s<seq> or c<n> id from a previous page, got '{before}'");
+
+            string caller = WorkflowManager.ResolveCallerAgent();
+            string agentFilter = string.IsNullOrEmpty(agent) || string.Equals(agent, "all", StringComparison.OrdinalIgnoreCase)
+                ? null
+                : string.Equals(agent, "self", StringComparison.OrdinalIgnoreCase)
+                    ? caller
+                    : WorkflowManager.NormalizeAgent(ClientProcessResolver.CanonicalizeExplicitAgentId(agent.Trim()));
+
+            var history = WorkflowManager.History;
+            WorkflowManager.BindPendingAgents();
+            // A redo puts a task back at the end of the list under its old seq, so the list is ordered by seq before paging.
+            var tasks = history.tasks
+                .Where(t => agentFilter == null || string.Equals(WorkflowManager.NormalizeAgent(t.agent), agentFilter, StringComparison.Ordinal))
+                .OrderBy(t => t.seq)
+                .ToList();
+
+            if (objects)
+            {
+                // The pre-3.0 shape, oldest first and unpaged unless a limit is given, for scripts that parse it.
+                var page = tasks.Where(t => ListKeyForStep(t.seq) < cutoff).ToList();
+                var selected = limit > 0 ? page.Skip(Math.Max(0, page.Count - limit)) : page;
+                var list = selected.Select(t => new
+                {
+                    id = t.id,
+                    tag = t.tag,
+                    description = t.description,
+                    time = t.GetFormattedTime(),
+                    changes = t.snapshots.Count,
+                    seq = t.DisplayId,
+                    agent = t.agent,
+                    group = t.group
+                }).ToList<object>(); // Converted to an object list for JSON serialization
+                return new { success = true, count = list.Count, history = list };
+            }
+
+            var checkpoints = history.checkpoints
+                .Where(c => agentFilter == null || string.Equals(WorkflowManager.NormalizeAgent(c.agent), agentFilter, StringComparison.Ordinal))
+                .OrderBy(c => c.seq)
+                .ToList();
+            var entries = new List<ListEntry>();
+            if (!checkpointsOnly)
+                entries.AddRange(tasks.Select(t => new ListEntry(ListKeyForStep(t.seq), t, null)));
+            entries.AddRange(checkpoints.Select(c => new ListEntry(ListKeyForCheckpoint(c.seq), null, c)));
+            entries = entries.Where(e => e.Key < cutoff).OrderByDescending(e => e.Key).ToList();
+
+            int take = limit > 0 ? limit : DefaultWorkflowListRows;
+            var shown = entries.Take(take).ToList();
+            var undone = WorkflowManager.UndoneSteps(history.restores);
+            var rows = shown.Select(e => e.Checkpoint != null
+                ? (checkpointsOnly
+                    ? FormatCheckpointSummaryRow(e.Checkpoint, caller, checkpoints, tasks)
+                    : FormatCheckpointRow(e.Checkpoint, caller))
+                : FormatTaskRow(e.Task, caller, undone.Contains(e.Task.seq))).ToList();
+
+            int total = checkpointsOnly ? checkpoints.Count : tasks.Count;
+            if (entries.Count > shown.Count)
+                return new { success = true, count = total, agent = caller, rows, more = ListEntryId(shown[shown.Count - 1]) };
+            return new { success = true, count = total, agent = caller, rows };
         }
 
-        [UnitySkill("workflow_undo_task", "Undo changes from a specific task (restore to previous state)",
+        /// <summary>
+        /// One row of the merged list. A step <c>s&lt;seq&gt;</c> sorts above the checkpoint at its own position, which marks
+        /// the state before that step; a checkpoint with no step yet at its position (the next seq) sorts above every step.
+        /// </summary>
+        private sealed class ListEntry
+        {
+            public readonly long Key;
+            public readonly WorkflowTask Task;
+            public readonly WorkflowCheckpoint Checkpoint;
+
+            public ListEntry(long key, WorkflowTask task, WorkflowCheckpoint checkpoint)
+            {
+                Key = key;
+                Task = task;
+                Checkpoint = checkpoint;
+            }
+        }
+
+        private static long ListKeyForStep(long seq) => 2 * seq + 1;
+        private static long ListKeyForCheckpoint(long position) => 2 * position;
+        private static string ListEntryId(ListEntry entry) => entry.Checkpoint != null ? entry.Checkpoint.id : entry.Task.DisplayId;
+
+        /// <summary>Reads a list cursor: <c>s&lt;seq&gt;</c> or a bare seq name a step, <c>c&lt;n&gt;</c> a checkpoint. Rows above it are shown.</summary>
+        private static bool TryParseListCursor(string cursor, out long cutoff)
+        {
+            cutoff = 0;
+            if (cursor.Length < 1)
+                return false;
+            char prefix = char.ToLowerInvariant(cursor[0]);
+            bool checkpoint = prefix == 'c';
+            string digits = prefix == 's' || checkpoint ? cursor.Substring(1) : cursor;
+            if (!long.TryParse(digits, out long seq))
+                return false;
+            cutoff = checkpoint ? ListKeyForCheckpoint(seq) : ListKeyForStep(seq);
+            return true;
+        }
+
+        private const int CheckpointLabelRowChars = 40;
+        private const int CheckpointSummaryCount = 2;
+
+        private static string FormatCheckpointRow(WorkflowCheckpoint checkpoint, string caller)
+        {
+            var row = new System.Text.StringBuilder(checkpoint.id).Append(' ').Append(FormatCheckpointTime(checkpoint)).Append(' ');
+            row.Append(CheckpointRowLabel(checkpoint));
+            AppendAgent(row, checkpoint.agent, caller);
+            return row.ToString();
+        }
+
+        /// <summary>The <c>view:"checkpoints"</c> row: the checkpoint, then the steps it covers up to the next newer checkpoint.</summary>
+        private static string FormatCheckpointSummaryRow(WorkflowCheckpoint checkpoint, string caller,
+            IList<WorkflowCheckpoint> checkpoints, IList<WorkflowTask> tasks)
+        {
+            int index = checkpoints.IndexOf(checkpoint);
+            long upper = index + 1 < checkpoints.Count ? checkpoints[index + 1].seq : long.MaxValue;
+            var covered = tasks.Where(t => t.seq >= checkpoint.seq && t.seq < upper).ToList();
+
+            var row = new System.Text.StringBuilder(FormatCheckpointRow(checkpoint, caller)).Append(": ");
+            row.Append(string.Join(", ", covered.Take(CheckpointSummaryCount).Select(t =>
+                string.IsNullOrEmpty(t.target) ? t.tag : t.tag + " " + t.target)));
+            row.Append(" (").Append(covered.Count).Append(')');
+            return row.ToString();
+        }
+
+        private static string CheckpointRowLabel(WorkflowCheckpoint checkpoint)
+        {
+            if (string.IsNullOrEmpty(checkpoint.label))
+                return checkpoint.kind ?? WorkflowCheckpoint.KindAuto;
+            string label = checkpoint.label.Replace('\n', ' ').Replace('\r', ' ');
+            if (label.Length > CheckpointLabelRowChars)
+                label = label.Substring(0, CheckpointLabelRowChars);
+            return "\"" + label + "\"";
+        }
+
+        private static string FormatCheckpointTime(WorkflowCheckpoint checkpoint) =>
+            DateTimeOffset.FromUnixTimeMilliseconds(checkpoint.timestampMs).ToLocalTime().ToString("HH:mm:ss");
+
+        private static object InvalidListArgument(string message) => new
+        {
+            error = message,
+            errorCode = SkillErrorCode.SemanticInvalid.ToWireString()
+        };
+
+        private static string FormatTaskRow(WorkflowTask task, string caller, bool undone)
+        {
+            var row = new System.Text.StringBuilder(task.DisplayId).Append(' ').Append(task.GetFormattedTime()).Append(' ').Append(task.tag);
+            if (!string.IsNullOrEmpty(task.target))
+                row.Append(' ').Append(task.target);
+            row.Append(" (").Append(task.snapshots?.Count ?? 0).Append(')');
+            AppendAgent(row, task.agent, caller);
+            if (undone)
+                row.Append(" (undone)");
+            return row.ToString();
+        }
+
+        // Rows name the agent only when it is not the caller, so a single-agent history carries no agent column at all.
+        private static void AppendAgent(System.Text.StringBuilder row, string agent, string caller)
+        {
+            if (string.IsNullOrEmpty(agent))
+                return;
+            agent = WorkflowManager.NormalizeAgent(agent);
+            if (!string.Equals(agent, caller, StringComparison.Ordinal))
+                row.Append(" @").Append(agent);
+        }
+
+
+        [UnitySkill("workflow_undo_task", "Undo one step or group (s<seq>, a group id, c<n> or a task UUID): its targets go back to their state before it; later steps on other targets stay; conflicts: omit to refuse on conflicts (WORKFLOW_CONFLICT lists them), \"keep\" to skip them, or the ids to overwrite.",
             Category = SkillCategory.Workflow, Operation = SkillOperation.Execute,
             Tags = new[] { "undo", "task", "revert", "restore" },
-            Outputs = new[] { "success", "taskId", "total", "succeeded", "failed", "details", "error" },
+            Outputs = new[] { "taskId", "to", "guard", "restored", "deleted", "recreated", "failed", "skipped", "coverage", "undo", "compileTriggered" },
             RequiresInput = new[] { "taskId" },
             // Restoring a snapshot rewrites everything that task touched: scene objects, and --
             // via UndoMovedSnapshot / RedoDeletedSnapshot / RestoreModifiedSnapshot -- project assets.
             MutatesScene = true, MutatesAssets = true)]
-        public static object WorkflowUndoTask(string taskId)
+        public static object WorkflowUndoTask(string taskId, string conflicts = null)
         {
-            var withdrawn = SurfaceRejectionForTasks("workflow_undo_task", "restoring this task's snapshots",
-                WorkflowManager.History.tasks.Where(t => t.id == taskId));
+            var steps = WorkflowManager.FindStepsForUndo(taskId);
+            var withdrawn = SurfaceRejectionForTasks("workflow_undo_task", "restoring this task's snapshots", steps);
             if (withdrawn != null)
                 return withdrawn;
+            if (steps.Count == 0)
+                return new
+                {
+                    error = $"Task not found: {taskId}",
+                    errorCode = SkillErrorCode.NotFound.ToWireString(),
+                    retryStrategy = SkillErrorResponse.RetryFixAndRetry
+                };
 
-            var result = WorkflowManager.UndoTask(taskId);
-            return new
-            {
-                success = result.success,
-                taskId = taskId,
-                result.total,
-                result.succeeded,
-                result.failed,
-                details = result.details.Select(d => new { d.globalObjectId, d.objectName, d.success, d.error }).ToList(),
-                error = result.error
-            };
+            var outcome = WorkflowManager.RestoreSteps(steps, taskId, WorkflowManager.ResolveCallerAgent(), conflicts);
+            if (outcome.error != null)
+                return RestoreError(outcome);
+            var result = RestoreResponse(outcome, taskId);
+            result["taskId"] = taskId;
+            return result;
         }
 
-        [UnitySkill("workflow_redo_task", "Redo a previously undone task (restore changes)",
+        [UnitySkill("workflow_redo_task", "Undo a restore (from workflow_restore or workflow_undo_task): only the targets it changed go back, later steps stay; taskId is the restore's s<seq>, its guard c<n>, or a step it reverted; omitted = your newest restore; conflicts: omit to refuse on conflicts (WORKFLOW_CONFLICT lists them), \"keep\" to skip them, or the ids to overwrite.",
             Category = SkillCategory.Workflow, Operation = SkillOperation.Execute,
             Tags = new[] { "redo", "task", "restore", "changes" },
-            Outputs = new[] { "success", "taskId", "total", "succeeded", "failed", "details", "error" },
+            Outputs = new[] { "to", "guard", "restored", "deleted", "recreated", "failed", "skipped", "coverage", "undo", "compileTriggered" },
             MutatesScene = true, MutatesAssets = true)]
-        public static object WorkflowRedoTask(string taskId = null)
+        public static object WorkflowRedoTask(string taskId = null, string conflicts = null)
         {
-            // When taskId isn't given, redo the most recently undone task
-            if (string.IsNullOrEmpty(taskId))
-            {
-                var undoneStack = WorkflowManager.GetUndoneStack();
-                if (undoneStack.Count == 0)
-                    return new { success = false, error = "No undone tasks to redo" };
-                taskId = undoneStack[undoneStack.Count - 1].id;
-            }
-
-            var withdrawn = SurfaceRejectionForTasks("workflow_redo_task", "re-applying this task's snapshots",
-                WorkflowManager.GetUndoneStack().Where(t => t.id == taskId));
+            var steps = WorkflowManager.FindStepsForRedo(taskId);
+            var withdrawn = SurfaceRejectionForTasks("workflow_redo_task", "re-applying this task's snapshots", steps);
             if (withdrawn != null)
                 return withdrawn;
 
-            var result = WorkflowManager.RedoTask(taskId);
-            return new
-            {
-                success = result.success,
-                taskId = taskId,
-                result.total,
-                result.succeeded,
-                result.failed,
-                details = result.details.Select(d => new { d.globalObjectId, d.objectName, d.success, d.error }).ToList(),
-                error = result.error
-            };
+            var outcome = WorkflowManager.RedoRestore(taskId, conflicts);
+            return outcome.error != null ? RestoreError(outcome) : RestoreResponse(outcome, outcome.to);
         }
 
-        [UnitySkill("workflow_undone_list", "List all undone tasks that can be redone",
+        [UnitySkill("workflow_undone_list", "List restores that can still be undone with workflow_redo_task.",
             Category = SkillCategory.Workflow, Operation = SkillOperation.Query,
             Tags = new[] { "undo", "redo", "list", "history" },
-            Outputs = new[] { "count", "undoneStack" },
+            Outputs = new[] { "count", "restores" },
             ReadOnly = true,
             Mode = SkillMode.SemiAuto)]
         public static object WorkflowUndoneList()
         {
-            var undoneStack = WorkflowManager.GetUndoneStack();
-            var list = undoneStack.Select(t => new
+            var restores = WorkflowManager.GetUndoableRestores().Select(restore => new
             {
-                id = t.id,
-                tag = t.tag,
-                description = t.description,
-                time = t.GetFormattedTime(),
-                changes = t.snapshots.Count
+                seq = "s" + restore.seq,
+                to = restore.to,
+                guard = restore.guard,
+                agent = restore.agent,
+                steps = restore.steps.Count
             }).ToList<object>();
 
-            return new { success = true, count = list.Count, undoneStack = list };
+            return new { success = true, count = restores.Count, restores };
         }
 
         [UnitySkill("workflow_revert_task", "Alias for workflow_undo_task (deprecated, use workflow_undo_task instead)",
@@ -389,7 +662,7 @@ namespace UnitySkills
             // Query using this skill's own name rather than handing it off to the delegate: the agent called workflow_revert_task, but if the rejection message shows
             // workflow_undo_task instead, it reads like "the alias is fine, the target is the problem," which would only bait a pointless retry.
             var withdrawn = SurfaceRejectionForTasks("workflow_revert_task", "restoring this task's snapshots",
-                WorkflowManager.History.tasks.Where(t => t.id == taskId));
+                WorkflowManager.History.tasks.Where(t => WorkflowManager.MatchesTaskId(t, taskId)));
             if (withdrawn != null)
                 return withdrawn;
 
@@ -425,7 +698,7 @@ namespace UnitySkills
             return new { success = true, objectName = target.name, type = target.GetType().Name };
         }
 
-        [UnitySkill("workflow_delete_task", "Delete a task from history (does not revert changes)",
+        [UnitySkill("workflow_delete_task", "Delete a task from history (does not revert changes); taskId is an s<seq> id or UUID.",
             Category = SkillCategory.Workflow, Operation = SkillOperation.Delete,
             Tags = new[] { "task", "delete", "history", "cleanup" },
             Outputs = new[] { "deletedId" },
@@ -438,7 +711,7 @@ namespace UnitySkills
         }
 
         [UnitySkill("workflow_clear_history",
-            "Permanently clear ALL workflow history: tasks, the redo (undone) stack, and every backed-up file blob in the content-addressed store. High-risk and irreversible — requires a confirmation token. This ONLY deletes the tracking history; it does NOT undo or revert any change already applied to your project assets, scenes, or settings.",
+            "Permanently clear ALL workflow history: tasks, restore records, and every backed-up file blob in the content-addressed store. High-risk and irreversible — requires a confirmation token. This ONLY deletes the tracking history; it does NOT undo or revert any change already applied to your project assets, scenes, or settings.",
             Category = SkillCategory.Workflow, Operation = SkillOperation.Delete,
             Tags = new[] { "workflow", "history", "clear", "cleanup", "delete" },
             Outputs = new[] { "success", "before", "after", "message" },
@@ -449,7 +722,7 @@ namespace UnitySkills
             var before = new
             {
                 tasks = history.tasks.Count,
-                undoneStack = history.undoneStack.Count,
+                restores = history.restores.Count,
                 historyFileBytes = WorkflowManager.GetHistoryFileSizeBytes(),
                 fileStoreBytes = WorkflowFileStore.GetStoreSizeBytes()
             };
@@ -460,7 +733,7 @@ namespace UnitySkills
             var after = new
             {
                 tasks = afterHistory.tasks.Count,
-                undoneStack = afterHistory.undoneStack.Count,
+                restores = afterHistory.restores.Count,
                 historyFileBytes = WorkflowManager.GetHistoryFileSizeBytes(),
                 fileStoreBytes = WorkflowFileStore.GetStoreSizeBytes()
             };
@@ -479,14 +752,16 @@ namespace UnitySkills
         [UnitySkill("workflow_session_start", "Start a new session (conversation-level). All changes will be tracked and can be undone together.",
             Category = SkillCategory.Workflow, Operation = SkillOperation.Execute,
             Tags = new[] { "session", "conversation", "tracking", "start" },
-            Outputs = new[] { "sessionId", "message" })]
+            Outputs = new[] { "sessionId", "checkpoint", "message" })]
         public static object WorkflowSessionStart(string tag = null)
         {
             string sessionId = WorkflowManager.BeginSession(tag);
+            string checkpoint = WorkflowManager.AddCheckpoint(null, WorkflowCheckpoint.KindSession, string.IsNullOrEmpty(tag) ? "Session" : tag);
             return new
             {
                 success = true,
                 sessionId = sessionId,
+                checkpoint,
                 message = "Session started. All changes will be tracked for undo."
             };
         }
@@ -510,12 +785,12 @@ namespace UnitySkills
             };
         }
 
-        [UnitySkill("workflow_session_undo", "Undo all changes made during a specific session (conversation-level undo)",
+        [UnitySkill("workflow_session_undo", "Undo all changes made during a specific session (conversation-level undo); conflicts: omit to refuse on conflicts (WORKFLOW_CONFLICT lists them), \"keep\" to skip them, or the ids to overwrite.",
             Category = SkillCategory.Workflow, Operation = SkillOperation.Execute,
             Tags = new[] { "session", "undo", "conversation", "revert" },
-            Outputs = new[] { "success", "sessionId", "total", "succeeded", "failed", "details", "error", "message" },
+            Outputs = new[] { "sessionId", "to", "guard", "restored", "deleted", "recreated", "failed", "skipped", "coverage", "undo", "compileTriggered" },
             MutatesScene = true, MutatesAssets = true)]
-        public static object WorkflowSessionUndo(string sessionId = null)
+        public static object WorkflowSessionUndo(string sessionId = null, string conflicts = null)
         {
             // When sessionId isn't given, take the most recent session
             if (string.IsNullOrEmpty(sessionId))
@@ -527,22 +802,16 @@ namespace UnitySkills
             }
 
             var withdrawn = SurfaceRejectionForTasks("workflow_session_undo", "restoring this session's snapshots",
-                WorkflowManager.History.tasks.Where(t => t.sessionId == sessionId));
+                WorkflowManager.FindStepsForSession(sessionId));
             if (withdrawn != null)
                 return withdrawn;
 
-            var result = WorkflowManager.UndoSession(sessionId);
-            return new
-            {
-                success = result.success,
-                sessionId = sessionId,
-                result.total,
-                result.succeeded,
-                result.failed,
-                details = result.details.Select(d => new { d.globalObjectId, d.objectName, d.success, d.error }).ToList(),
-                error = result.error,
-                message = result.success ? "Session changes undone successfully" : "Failed to undo session"
-            };
+            var outcome = WorkflowManager.RestoreSession(sessionId, conflicts);
+            if (outcome.error != null)
+                return RestoreError(outcome);
+            var result = RestoreResponse(outcome, outcome.to);
+            result["sessionId"] = sessionId;
+            return result;
         }
 
         [UnitySkill("workflow_session_list", "List all recorded sessions (conversation-level history)",
@@ -722,7 +991,7 @@ namespace UnitySkills
         /// An empty task set doesn't count as a rejection -- that id might simply not exist, and
         /// answering "withdrawn" for a nonexistent task would hide a plain typo behind the policy wall.
         /// </summary>
-        private static object SurfaceRejectionForTasks(
+        internal static object SurfaceRejectionForTasks(
             string skillName, string subject, IEnumerable<WorkflowTask> tasks)
         {
             if (SkillsSurfaceProfile.IsFull || tasks == null)

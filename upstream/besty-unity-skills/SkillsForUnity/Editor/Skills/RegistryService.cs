@@ -7,6 +7,7 @@ using System.Text;
 using UnityEngine;
 using UnityEditor;
 using Newtonsoft.Json;
+using UnitySkills.Internal;
 
 namespace UnitySkills
 {
@@ -17,7 +18,7 @@ namespace UnitySkills
     public static class RegistryService
     {
         private static readonly string GlobalConfigDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".unity_skills");
-        // Test hook (same idiom as WorkflowManager.OverrideHistoryFilePathForTests); volatile because GetLiveInstances reads it off the main thread.
+        // Test hook (same idiom as WorkflowManager.OverrideRootForTests); volatile because GetLiveInstances reads it off the main thread.
         internal static volatile string OverrideRegistryFilePathForTests;
         private static string RegistryFile => OverrideRegistryFilePathForTests ?? Path.Combine(GlobalConfigDir, "registry.json");
 
@@ -51,6 +52,10 @@ namespace UnitySkills
                 var pathHash = ComputeStableHash(ProjectPath);
                 var cleanName = System.Text.RegularExpressions.Regex.Replace(ProjectName, "[^a-zA-Z0-9]", "");
                 InstanceId = $"{cleanName}_{pathHash}";
+
+                // Identity above is pure and other code reads it; below are the side effects a worker must not have:
+                // creating the global folder and removing the editor's entry when the worker exits.
+                if (ImportWorkerGate.IsWorkerProcess) return;
 
                 if (!Directory.Exists(GlobalConfigDir))
                     Directory.CreateDirectory(GlobalConfigDir);
@@ -163,6 +168,10 @@ namespace UnitySkills
 
                 AtomicReadModifyWrite(registry =>
                 {
+                    // Only the process that owns the entry removes it: another process of the same project exiting
+                    // (an import worker, a batchmode run) must not take the live editor out of discovery.
+                    if (registry.TryGetValue(ProjectPath, out var existing) && existing != null && existing.pid != CurrentPid)
+                        return;
                     registry.Remove(ProjectPath);
                 });
             }

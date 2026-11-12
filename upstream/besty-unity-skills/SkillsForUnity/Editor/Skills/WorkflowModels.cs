@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Linq;
 using UnityEngine;
 using UnityEditor;
 using UnitySkills.Internal;
@@ -11,6 +12,8 @@ namespace UnitySkills.Internal
     {
         public string globalObjectId; // String representation of the Unity GlobalObjectId
         public int objectInstanceId;  // Fallback identifier within the same session, for objects in a scene that was never saved
+        public string entityId;       // Same-session fallback that still works on 6000.4+, where objectInstanceId is always 0
+        public string idSession;      // Set only when captured in another editor session than its task's (an inverse appended later)
         public string originalJson;   // JSON state captured by EditorJsonUtility
         public bool objectReferencesCaptured;
         public List<ObjectReferenceData> objectReferences = new List<ObjectReferenceData>();
@@ -18,7 +21,7 @@ namespace UnitySkills.Internal
         public string typeName;       // e.g. "GameObject", "Transform"
         public SnapshotType type = SnapshotType.Modified;
         public string assetPath;      // For assets: the in-project path (e.g. "Assets/Materials/Red.mat")
-        public string assetBytesBase64; // Base64-encoded asset file backup (legacy field, kept for backward compatibility with old history)
+        public string assetFingerprint; // "<length>:<lastWriteTimeUtc ticks>" of the asset file when its task ended; null for folders
 
         // Hash into the content-addressed file store, used by Modified/Deleted asset snapshots.
         public string fileHash;
@@ -36,10 +39,21 @@ namespace UnitySkills.Internal
         public string settingKey;
         public string settingOldValueJson;
 
+        // The state when the step ended (P2). afterStateHash is a header field; the rest is payload, cleared with the payload.
+        public string afterStateHash;      // WorkflowStateHash of the object (or setting value) after the step, null when not captured
+        public string afterJson;           // EditorJsonUtility JSON of the object after the step
+        public List<ObjectReferenceData> afterObjectReferences;
+        public bool afterObjectReferencesCaptured;
+        public string settingAfterValueJson;
+
+        // The live object of a Modified snapshot until the step ends, when its after-state is read; never stored.
+        [NonSerialized] internal UnityEngine.Object liveTarget;
+
         // For undoing a Created-type component: extra info needed for reliable deletion
         public string componentTypeName;   // The component's fully qualified type name (e.g. "UnityEngine.Rigidbody")
         public string parentGameObjectId;  // The parent GameObject's GlobalObjectId
         public int parentGameObjectInstanceId;
+        public string parentGameObjectEntityId;
 
         // For redoing a Created-type GameObject: info needed to recreate it
         public string primitiveType;       // The PrimitiveType name (Cube, Sphere, etc.), or an empty string for an empty GameObject
@@ -54,6 +68,15 @@ namespace UnitySkills.Internal
 
         // Flattened hierarchy data for a deleted/recreated scene GameObject.
         public List<GameObjectSnapshotData> gameObjectHierarchy = new List<GameObjectSnapshotData>();
+
+        // The stored payload (this object as JSON) once a record names it. A stub read back from the log, or a recorded
+        // snapshot whose payload was released, holds only its header until WorkflowManager hydrates it; fileRefs then
+        // keeps the hashes of its directory entries.
+        [NonSerialized] internal string payloadHash;
+        [NonSerialized] internal bool payloadReleased;
+        // Why the payload could not be read back, kept so a second read reports the first reason (a damaged blob is quarantined on the first).
+        [NonSerialized] internal string payloadError;
+        [NonSerialized] internal List<string> fileRefs;
     }
 
     [Serializable]
@@ -70,8 +93,10 @@ namespace UnitySkills.Internal
     {
         public string globalObjectId;
         public int objectInstanceId;
+        public string entityId;
         public string transformGlobalObjectId;
         public int transformInstanceId;
+        public string transformEntityId;
         public string name;
         public int parentIndex = -1;
         public bool activeSelf;
@@ -80,6 +105,7 @@ namespace UnitySkills.Internal
         public int siblingIndex;
         public string externalParentGlobalObjectId;
         public int externalParentInstanceId;
+        public string externalParentEntityId;
         public float posX, posY, posZ;
         public float rotX, rotY, rotZ, rotW;
         public float scaleX = 1, scaleY = 1, scaleZ = 1;
@@ -89,27 +115,67 @@ namespace UnitySkills.Internal
 
 namespace UnitySkills
 {
+    /// <summary>The two stacks as replayed from <see cref="WorkflowStore"/>'s log; never serialized as a whole.</summary>
     [Serializable]
     public class WorkflowHistoryData
     {
-        public const int CurrentSchemaVersion = 5;
-        public int schemaVersion = CurrentSchemaVersion;
         public List<WorkflowTask> tasks = new List<WorkflowTask>();
-        public List<WorkflowTask> undoneStack = new List<WorkflowTask>(); // Stack of undone tasks, for redo
+        public List<WorkflowCheckpoint> checkpoints = new List<WorkflowCheckpoint>();
+        public List<WorkflowRestoreRecord> restores = new List<WorkflowRestoreRecord>();
+        public long nextSeq = 1; // Next short task id (s<seq>); never reused within one history
 
         public void EnsureDefaults()
         {
             if (tasks == null) tasks = new List<WorkflowTask>();
-            if (undoneStack == null) undoneStack = new List<WorkflowTask>();
+            if (checkpoints == null) checkpoints = new List<WorkflowCheckpoint>();
+            if (restores == null) restores = new List<WorkflowRestoreRecord>();
 
             tasks.RemoveAll(task => task == null);
-            undoneStack.RemoveAll(task => task == null);
+            checkpoints.RemoveAll(checkpoint => checkpoint == null);
+            restores.RemoveAll(restore => restore == null);
 
-            foreach (var task in tasks)
-                task?.EnsureSnapshotIndex();
-            foreach (var task in undoneStack)
-                task?.EnsureSnapshotIndex();
+            long max = tasks.Select(task => task.seq)
+                .Concat(restores.Select(restore => restore.seq)).DefaultIfEmpty(0).Max();
+            if (nextSeq <= max)
+                nextSeq = max + 1;
         }
+
+        internal long AllocateSeq() => nextSeq++;
+    }
+
+    /// <summary>
+    /// A named position in the history: the state before the step at <see cref="seq"/> (the step that follows it). Its id
+    /// is "c" + seq, so one position holds at most one checkpoint.
+    /// </summary>
+    [Serializable]
+    public class WorkflowCheckpoint
+    {
+        internal const string KindAuto = "auto";
+        internal const string KindExplicit = "explicit";
+        internal const string KindTask = "task";
+        internal const string KindSession = "session";
+        internal const string KindGuard = "guard";
+
+        public string id;
+        public long seq;          // Position: the seq the step after the checkpoint got (or will get)
+        public long timestampMs;
+        public string agent;
+        public string kind;       // auto | explicit | task | session | guard
+        public string label;
+        public long cursor;       // Change journal cursor at the checkpoint
+    }
+
+    /// <summary>One restore (undo or rollback to a checkpoint), as a step of its own: which steps it reverted, and their aliases.</summary>
+    [Serializable]
+    public class WorkflowRestoreRecord
+    {
+        public long seq;          // The restore step's seq
+        public string to;         // The checkpoint or step the restore went back to
+        public string guard;      // The guard checkpoint taken before the restore
+        public string agent;
+        public List<long> steps = new List<long>();
+        public List<string[]> aliases = new List<string[]>(); // [oldGlobalObjectId, newGlobalObjectId]
+        public string scope;         // The scope a partial restore was limited to; null for a whole restore
     }
 
     [Serializable]
@@ -120,8 +186,25 @@ namespace UnitySkills
         public string description;
         public long timestamp;
         public string sessionId;  // Groups tasks from the same conversation/session together
+        public long seq;          // Short id, shown as s<seq>; assigned when the task is recorded
+        public string agent;      // Caller the task is attributed to when it ends ("unknown" without a REST identity)
+        public string group;      // g<seq of its first task> for one agent's run of writes, j<jobId> for an async batch job's chunks
+        public string target;     // Main target named by the call's arguments, for the compact list
+        public long cursorStart;  // Change journal cursor when the task began, and when it ended (0 = not recorded)
+        public long cursorEnd;
+        public string idSession;  // Editor session the snapshots were captured in; instance/entity ids are only valid there
         public List<ObjectSnapshot> snapshots = new List<ObjectSnapshot>();
+        public int snapshotsSkipped; // Objects past the per-step capture limit that were not recorded, so this step cannot restore them
         [NonSerialized] private HashSet<string> _snapshotKeys;
+        [NonSerialized] private HashSet<string> _entityKeys;
+        [NonSerialized] internal bool autoStarted;
+        [NonSerialized] internal long startedUnixMs;
+        // The connection whose process-resolver answer was still pending when the task ended (0 once settled); the agent
+        // is bound late from it, as telemetry does. Never set for an explicit X-Agent-Id.
+        [NonSerialized] internal int pendingAgentPort;
+        [NonSerialized] internal long pendingAgentSinceMs;
+
+        public string DisplayId => seq > 0 ? "s" + seq : id;
 
         public string GetFormattedTime()
         {
@@ -134,6 +217,7 @@ namespace UnitySkills
                 return;
 
             _snapshotKeys = new HashSet<string>(StringComparer.Ordinal);
+            _entityKeys = new HashSet<string>(StringComparer.Ordinal);
             if (snapshots == null)
             {
                 snapshots = new List<ObjectSnapshot>();
@@ -145,7 +229,28 @@ namespace UnitySkills
             {
                 if (ShouldDeduplicate(snapshot) && !string.IsNullOrEmpty(snapshot.globalObjectId))
                     _snapshotKeys.Add(GetSnapshotKey(snapshot.globalObjectId, snapshot.type));
+                if (ShouldDeduplicate(snapshot) && !string.IsNullOrEmpty(snapshot.entityId))
+                    _entityKeys.Add(GetSnapshotKey(snapshot.entityId, snapshot.type));
             }
+        }
+
+        internal void RegisterEntitySnapshot(ObjectSnapshot snapshot)
+        {
+            if (!ShouldDeduplicate(snapshot) || string.IsNullOrEmpty(snapshot.entityId))
+                return;
+
+            EnsureSnapshotIndex();
+            _entityKeys.Add(GetSnapshotKey(snapshot.entityId, snapshot.type));
+        }
+
+        /// <summary>Whether this task already holds a snapshot of the live object with this entity id, checked before any capture work.</summary>
+        internal bool HasEntitySnapshot(string entityId, SnapshotType type)
+        {
+            if (string.IsNullOrEmpty(entityId))
+                return false;
+
+            EnsureSnapshotIndex();
+            return _entityKeys.Contains(GetSnapshotKey(entityId, type));
         }
 
         internal bool TryRegisterSnapshot(string globalObjectId, SnapshotType type)
@@ -169,14 +274,19 @@ namespace UnitySkills
         internal void InvalidateSnapshotIndex()
         {
             _snapshotKeys = null;
+            _entityKeys = null;
         }
 
         internal static bool ShouldDeduplicate(ObjectSnapshot snapshot)
         {
-            if (snapshot == null) return false;
-            return snapshot.type == SnapshotType.Modified ||
-                   snapshot.type == SnapshotType.Created ||
-                   snapshot.type == SnapshotType.Setting;
+            return snapshot != null && ShouldDeduplicate(snapshot.type);
+        }
+
+        internal static bool ShouldDeduplicate(SnapshotType type)
+        {
+            return type == SnapshotType.Modified ||
+                   type == SnapshotType.Created ||
+                   type == SnapshotType.Setting;
         }
 
         private static string GetSnapshotKey(string globalObjectId, SnapshotType type)
@@ -201,6 +311,7 @@ namespace UnitySkills
         public string json;          // Serialized component data
         public string globalObjectId;
         public int objectInstanceId;
+        public string entityId;
         public bool objectReferencesCaptured;
         public List<ObjectReferenceData> objectReferences = new List<ObjectReferenceData>();
     }
@@ -211,6 +322,7 @@ namespace UnitySkills
         public string propertyPath;
         public string globalObjectId;
         public int objectInstanceId;
+        public string entityId;
     }
 
     /// <summary>
@@ -246,59 +358,59 @@ namespace UnitySkills
     public class WorkflowTrimReport
     {
         public int removedTasks;
+        public int removedSegments;
         public int reclaimedFileEntries;
         public long reclaimedBytes;
     }
 
+    /// <summary>The pre-3.0 history moved aside into workflow_legacy/ (it is not migrated).</summary>
+    public sealed class WorkflowLegacyBackupInfo
+    {
+        public long TotalBytes { get; }
+        public DateTime MovedAtUtc { get; }
+
+        public WorkflowLegacyBackupInfo(long totalBytes, DateTime movedAtUtc)
+        {
+            TotalBytes = totalBytes;
+            MovedAtUtc = movedAtUtc;
+        }
+    }
+
     /// <summary>
-    /// Persistent auto-cleanup configuration for workflow history and the file store.
-    /// Stored under the "UnitySkills.Workflow.*" EditorPrefs keys.
+    /// Persistent auto-cleanup configuration for the workflow history (log segments plus blobs).
+    /// Stored per project under the "UnitySkills.Workflow.*" keys of <see cref="ProjectPrefs"/>
+    /// (UserSettings/UnitySkills/settings.json). CapacityMB and MaxAgeDays are new in 3.0, under new keys, so a pre-3.0
+    /// history JSON limit is never read as the total budget; only Enabled falls back to the pre-3.0 global value.
     /// </summary>
     public static class WorkflowAutoCleanConfig
     {
         private const string Prefix = "UnitySkills.Workflow.";
 
         private const string KeyEnabled = Prefix + "Enabled";
-        private const string KeyMaxTasks = Prefix + "MaxTasks";
-        private const string KeyMaxHistoryMB = Prefix + "MaxHistoryMB";
-        private const string KeyMaxTaskAgeDays = Prefix + "MaxTaskAgeDays";
-        private const string KeyMaxStoreMB = Prefix + "MaxStoreMB";
-        private const string KeyStoreMaxAgeDays = Prefix + "StoreMaxAgeDays";
+        private const string KeyCapacityMB = Prefix + "CapacityMB";
+        private const string KeyMaxAgeDays = Prefix + "MaxAgeDays";
+
+        internal const int DefaultCapacityMB = 512;
+        internal const int DefaultMaxAgeDays = 30;
 
         public static bool Enabled
         {
-            get => EditorPrefs.GetBool(KeyEnabled, true);
-            set => EditorPrefs.SetBool(KeyEnabled, value);
+            get => ProjectPrefs.GetBool(KeyEnabled, true);
+            set => ProjectPrefs.SetBool(KeyEnabled, value);
         }
 
-        public static int MaxTasks
+        /// <summary>Budget for the log segments plus the blobs, in MB; 0 = unlimited.</summary>
+        public static int CapacityMB
         {
-            get => EditorPrefs.GetInt(KeyMaxTasks, 200);
-            set => EditorPrefs.SetInt(KeyMaxTasks, value);
+            get => ProjectPrefs.GetInt(KeyCapacityMB, DefaultCapacityMB);
+            set => ProjectPrefs.SetInt(KeyCapacityMB, value);
         }
 
-        public static int MaxHistoryMB
+        /// <summary>A sealed log segment whose newest record is older than this is evicted; 0 = no age limit.</summary>
+        public static int MaxAgeDays
         {
-            get => EditorPrefs.GetInt(KeyMaxHistoryMB, 32);
-            set => EditorPrefs.SetInt(KeyMaxHistoryMB, value);
-        }
-
-        public static int MaxTaskAgeDays
-        {
-            get => EditorPrefs.GetInt(KeyMaxTaskAgeDays, 30);
-            set => EditorPrefs.SetInt(KeyMaxTaskAgeDays, value);
-        }
-
-        public static int MaxStoreMB
-        {
-            get => EditorPrefs.GetInt(KeyMaxStoreMB, 512);
-            set => EditorPrefs.SetInt(KeyMaxStoreMB, value);
-        }
-
-        public static int StoreMaxAgeDays
-        {
-            get => EditorPrefs.GetInt(KeyStoreMaxAgeDays, 7);
-            set => EditorPrefs.SetInt(KeyStoreMaxAgeDays, value);
+            get => ProjectPrefs.GetInt(KeyMaxAgeDays, DefaultMaxAgeDays);
+            set => ProjectPrefs.SetInt(KeyMaxAgeDays, value);
         }
 
         /// <summary>
@@ -307,11 +419,35 @@ namespace UnitySkills
         public static void ResetToDefaults()
         {
             Enabled = true;
-            MaxTasks = 200;
-            MaxHistoryMB = 32;
-            MaxTaskAgeDays = 30;
-            MaxStoreMB = 512;
-            StoreMaxAgeDays = 7;
+            CapacityMB = DefaultCapacityMB;
+            MaxAgeDays = DefaultMaxAgeDays;
+        }
+    }
+
+    /// <summary>
+    /// Automatic checkpoint policy, stored per project under the "UnitySkills.Workflow.*" keys of <see cref="ProjectPrefs"/>.
+    /// Both keys are new in 3.0, so they have no pre-3.0 global value.
+    /// </summary>
+    public static class WorkflowCheckpointConfig
+    {
+        private const string KeyAutoCheckpoints = "UnitySkills.Workflow.AutoCheckpoints";
+        private const string KeyIdleGapSeconds = "UnitySkills.Workflow.IdleGapSeconds";
+
+        internal const int DefaultIdleGapSeconds = 30;
+        internal const int MinIdleGapSeconds = 5;
+
+        /// <summary>Whether a router run that starts after an idle gap gets an automatic checkpoint.</summary>
+        public static bool AutoCheckpoints
+        {
+            get => ProjectPrefs.GetBool(KeyAutoCheckpoints, true);
+            set => ProjectPrefs.SetBool(KeyAutoCheckpoints, value);
+        }
+
+        /// <summary>How long an agent must be idle (busy time such as compiles excluded) before its next write starts a run; at least 5.</summary>
+        public static int IdleGapSeconds
+        {
+            get => Math.Max(MinIdleGapSeconds, ProjectPrefs.GetInt(KeyIdleGapSeconds, DefaultIdleGapSeconds));
+            set => ProjectPrefs.SetInt(KeyIdleGapSeconds, Math.Max(MinIdleGapSeconds, value));
         }
     }
 

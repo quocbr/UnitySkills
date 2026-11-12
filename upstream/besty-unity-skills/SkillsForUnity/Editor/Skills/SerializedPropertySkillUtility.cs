@@ -10,6 +10,10 @@ namespace UnitySkills
 {
     internal static class SerializedPropertySkillUtility
     {
+        // A miss scans every loaded type, over a second per call on Unity 6; loaded types only change with a domain
+        // reload, which also resets this cache, so misses are cached too.
+        private static readonly Dictionary<string, Type> _unityObjectTypes = new Dictionary<string, Type>(StringComparer.Ordinal);
+
         public static SerializedProperty FindProperty(SerializedObject serializedObject, string propertyPath)
         {
             if (serializedObject == null || string.IsNullOrWhiteSpace(propertyPath))
@@ -30,7 +34,17 @@ namespace UnitySkills
             return serializedObject.FindProperty("m_" + propertyPath);
         }
 
-        public static object[] ListProperties(UnityEngine.Object target, bool includeChildren = true, int limit = 200)
+        /// <summary>The [SkillParam] note of every serialized-property reader's includeHidden parameter.</summary>
+        internal const string IncludeHiddenNote =
+            "false (default) lists what the Inspector shows. true also lists fields it hides, e.g. HingeJoint m_ConnectedBody, [HideInInspector] members and Unity's m_ObjectHideFlags / m_PrefabInstance bookkeeping, which count toward limit.";
+
+        /// <summary>
+        /// Lists the target's serialized properties. <paramref name="includeHidden"/> walks with Next instead of
+        /// NextVisible, so fields the Inspector hides (HingeJoint.m_ConnectedBody, [HideInInspector] members, Unity's
+        /// own m_ObjectHideFlags / m_PrefabInstance bookkeeping) are listed too and count toward <paramref name="limit"/>.
+        /// An ObjectReference entry carries <c>referenceState</c>; other entries carry no such key.
+        /// </summary>
+        public static object[] ListProperties(UnityEngine.Object target, bool includeChildren = true, int limit = 200, bool includeHidden = false)
         {
             var serializedObject = new SerializedObject(target);
             serializedObject.Update();
@@ -38,10 +52,28 @@ namespace UnitySkills
             var results = new List<object>();
             var iterator = serializedObject.GetIterator();
             var enterChildren = true;
-            while (iterator.NextVisible(enterChildren) && results.Count < Math.Max(1, limit))
+            while ((includeHidden ? iterator.Next(enterChildren) : iterator.NextVisible(enterChildren)) && results.Count < Math.Max(1, limit))
             {
-                enterChildren = includeChildren;
                 var copy = iterator.Copy();
+                // Next, unlike NextVisible, also steps into a string's character array and a reference's m_FileID / m_PathID.
+                enterChildren = includeChildren && !(includeHidden && IsLeafValue(copy));
+                if (copy.propertyType == SerializedPropertyType.ObjectReference)
+                {
+                    results.Add(new
+                    {
+                        propertyPath = copy.propertyPath,
+                        name = copy.name,
+                        displayName = copy.displayName,
+                        propertyType = copy.propertyType.ToString(),
+                        type = copy.type,
+                        isArray = copy.isArray,
+                        editable = copy.editable,
+                        value = DescribeValue(copy),
+                        referenceState = DescribeReferenceState(copy)
+                    });
+                    continue;
+                }
+
                 results.Add(new
                 {
                     propertyPath = copy.propertyPath,
@@ -58,6 +90,23 @@ namespace UnitySkills
             return results.ToArray();
         }
 
+        private static bool IsLeafValue(SerializedProperty property) =>
+            property.propertyType == SerializedPropertyType.String || property.propertyType == SerializedPropertyType.ObjectReference;
+
+        /// <summary>
+        /// What an ObjectReference property holds, which its <c>"null"</c> value cannot say: <c>none</c> (never assigned or
+        /// cleared), <c>missing</c> (assigned, but the target was destroyed or its asset deleted) or <c>assigned</c>.
+        /// Null for any other property type.
+        /// </summary>
+        public static string DescribeReferenceState(SerializedProperty property)
+        {
+            if (property == null || property.propertyType != SerializedPropertyType.ObjectReference)
+                return null;
+            if (property.objectReferenceValue != null)
+                return "assigned";
+            return UnityObjectIdUtility.HasMissingObjectReference(property) ? "missing" : "none";
+        }
+
         public static bool TrySetProperty(
             SerializedProperty property,
             string value,
@@ -72,7 +121,8 @@ namespace UnitySkills
         /// <summary>
         /// Writes <paramref name="value"/> into the SerializedObject copy (nothing reaches the target until the
         /// caller applies it). <paramref name="warning"/> is non-null when the write succeeded but may not mean what
-        /// the caller intended, e.g. an enum number taken as a member index.
+        /// the caller intended, e.g. an enum number taken as a member index. An object reference is located by
+        /// <paramref name="referenceEntityId"/>, instance id, path or name, as <see cref="TryResolveObjectReference"/> orders them.
         /// </summary>
         public static bool TrySetProperty(
             SerializedProperty property,
@@ -83,7 +133,8 @@ namespace UnitySkills
             string assetPath,
             string objectType,
             out string error,
-            out string warning)
+            out string warning,
+            string referenceEntityId = null)
         {
             error = null;
             warning = null;
@@ -150,13 +201,14 @@ namespace UnitySkills
                             string.IsNullOrWhiteSpace(referenceName) &&
                             referenceInstanceId == 0 &&
                             string.IsNullOrWhiteSpace(referencePath) &&
+                            !UnityObjectIdUtility.IsGivenEntityId(referenceEntityId) &&
                             (value == null || string.Equals(value, "null", StringComparison.OrdinalIgnoreCase)))
                         {
                             property.objectReferenceValue = null;
                             return true;
                         }
 
-                        if (!TryResolveObjectReference(referenceName, referenceInstanceId, referencePath, assetPath, objectType, out var objectValue, out error))
+                        if (!TryResolveObjectReference(referenceName, referenceInstanceId, referencePath, assetPath, objectType, out var objectValue, out error, referenceEntityId))
                         {
                             return false;
                         }
@@ -233,6 +285,11 @@ namespace UnitySkills
             }
         }
 
+        /// <summary>
+        /// Resolves an object reference to write: an asset by <paramref name="assetPath"/>, otherwise the object
+        /// <see cref="TryFindObject"/> locates. A component's id binds that exact component when <paramref name="objectType"/>
+        /// names its type or a base type, and an id may name an asset or any other object, which is the reference as it is.
+        /// </summary>
         public static bool TryResolveObjectReference(
             string referenceName,
             int referenceInstanceId,
@@ -240,15 +297,38 @@ namespace UnitySkills
             string assetPath,
             string objectType,
             out UnityEngine.Object result,
-            out string error)
+            out string error,
+            string referenceEntityId = null)
+        {
+            var resolved = TryResolveObjectReferenceDetailed(
+                referenceName, referenceInstanceId, referencePath, assetPath, objectType, referenceEntityId, out result, out var detail);
+            error = null;
+            if (!resolved)
+                error = SkillResultHelper.TryGetError(detail, out var text) ? text : "Object reference could not be resolved";
+            return resolved;
+        }
+
+        /// <summary>
+        /// <see cref="TryResolveObjectReference"/> with the failure as a ready-to-return skill result, so an ambiguous name
+        /// keeps its candidate list.
+        /// </summary>
+        internal static bool TryResolveObjectReferenceDetailed(
+            string referenceName,
+            int referenceInstanceId,
+            string referencePath,
+            string assetPath,
+            string objectType,
+            string referenceEntityId,
+            out UnityEngine.Object result,
+            out object error)
         {
             result = null;
             error = null;
 
             if (!string.IsNullOrWhiteSpace(assetPath))
             {
-                var targetType = ResolveUnityObjectType(objectType) ?? typeof(UnityEngine.Object);
-                result = AssetDatabase.LoadAssetAtPath(assetPath, targetType);
+                var assetType = ResolveUnityObjectType(objectType) ?? typeof(UnityEngine.Object);
+                result = AssetDatabase.LoadAssetAtPath(assetPath, assetType);
                 if (result == null)
                 {
                     result = AssetDatabase.LoadAssetAtPath<UnityEngine.Object>(assetPath);
@@ -256,24 +336,44 @@ namespace UnitySkills
 
                 if (result == null)
                 {
-                    error = $"Asset not found: {assetPath}";
+                    error = new { error = $"Asset not found: {assetPath}" };
                     return false;
                 }
 
-                if (targetType != typeof(UnityEngine.Object) && !targetType.IsAssignableFrom(result.GetType()))
+                if (assetType != typeof(UnityEngine.Object) && !assetType.IsAssignableFrom(result.GetType()))
                 {
-                    error = $"Asset '{assetPath}' is {result.GetType().Name}, expected {targetType.Name}";
+                    error = new { error = $"Asset '{assetPath}' is {result.GetType().Name}, expected {assetType.Name}" };
+                    result = null;
                     return false;
                 }
 
                 return true;
             }
 
-            var go = GameObjectFinder.Find(name: referenceName, instanceId: referenceInstanceId, path: referencePath);
+            if (string.IsNullOrWhiteSpace(referenceEntityId) && referenceInstanceId == 0 &&
+                string.IsNullOrWhiteSpace(referencePath) && string.IsNullOrWhiteSpace(referenceName))
+            {
+                error = new { error = "Scene reference not found: pass one of entityId, instanceId, path or name" };
+                return false;
+            }
+
+            if (!TryFindObject(referenceName, referenceInstanceId, referenceEntityId, referencePath, "Scene reference", out var found, out error))
+                return false;
+
+            var named = found as Component;
+            var go = found as GameObject ?? named?.gameObject;
             if (go == null)
             {
-                error = $"Scene reference not found: name='{referenceName}', instanceId={referenceInstanceId}, path='{referencePath}'";
-                return false;
+                // An id named an asset or another object outside the scene: it is the reference as it is, if the bound type accepts it.
+                var boundType = ResolveUnityObjectType(objectType) ?? typeof(UnityEngine.Object);
+                if (!boundType.IsAssignableFrom(found.GetType()))
+                {
+                    error = new { error = $"'{found.name}' is a {found.GetType().Name}, expected {boundType.Name}" };
+                    return false;
+                }
+
+                result = found;
+                return true;
             }
 
             if (string.IsNullOrWhiteSpace(objectType) ||
@@ -284,37 +384,99 @@ namespace UnitySkills
                 return true;
             }
 
+            Type wanted;
             if (string.Equals(objectType, "Transform", StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(objectType, "UnityEngine.Transform", StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(objectType, "RectTransform", StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(objectType, "UnityEngine.RectTransform", StringComparison.OrdinalIgnoreCase))
+                string.Equals(objectType, "UnityEngine.Transform", StringComparison.OrdinalIgnoreCase))
             {
-                result = go.GetComponent(objectType.EndsWith("RectTransform", StringComparison.OrdinalIgnoreCase)
-                    ? typeof(RectTransform)
-                    : typeof(Transform));
-                if (result == null)
+                wanted = typeof(Transform);
+            }
+            else if (string.Equals(objectType, "RectTransform", StringComparison.OrdinalIgnoreCase) ||
+                     string.Equals(objectType, "UnityEngine.RectTransform", StringComparison.OrdinalIgnoreCase))
+            {
+                wanted = typeof(RectTransform);
+            }
+            else
+            {
+                wanted = ComponentSkills.FindComponentType(objectType);
+                if (wanted == null)
                 {
-                    error = $"Component '{objectType}' not found on '{go.name}'";
+                    error = new { error = $"Unity Object type not found: {objectType}" };
                     return false;
                 }
-                return true;
             }
 
-            var componentType = ComponentSkills.FindComponentType(objectType);
-            if (componentType != null)
+            // A component's own id names that component, even when its GameObject carries several of the type.
+            result = named != null && wanted.IsAssignableFrom(named.GetType()) ? named : go.GetComponent(wanted);
+            if (result == null)
             {
-                result = go.GetComponent(componentType);
-                if (result == null)
-                {
-                    error = $"Component '{objectType}' not found on '{go.name}'";
-                    return false;
-                }
-                return true;
+                error = new { error = $"Component '{objectType}' not found on '{go.name}'" };
+                return false;
             }
 
-            error = $"Unity Object type not found: {objectType}";
-            return false;
+            return true;
         }
+
+        /// <summary>
+        /// Finds the object a reference names. One locator decides, in this order: entityId, instance id, path, name. The
+        /// first one given is never replaced by a lower one, so a stale id or a mistyped path is an error and cannot land on
+        /// a same-name object. An id may name a GameObject, a component or an asset; a path or a name names a GameObject,
+        /// and an ambiguous name is reported with its candidates, as <see cref="GameObjectFinder.FindOrError"/> does.
+        /// <paramref name="error"/> is a ready-to-return skill result.
+        /// </summary>
+        internal static bool TryFindObject(string name, int instanceId, string entityId, string path, string what,
+            out UnityEngine.Object found, out object error)
+        {
+            found = null;
+            error = null;
+
+            if (!string.IsNullOrWhiteSpace(entityId))
+            {
+                found = UnityObjectIdUtility.EntityIdToObject(entityId);
+                if (found == null)
+                {
+                    error = NotFoundError($"{what} not found for entityId {entityId.Trim()}");
+                    return false;
+                }
+
+                return true;
+            }
+
+            if (instanceId != 0)
+            {
+                found = UnityObjectIdUtility.ObjectIdToObject(instanceId);
+                if (found == null)
+                {
+                    error = NotFoundError($"{what} not found for instanceId {instanceId}"
+#if UNITY_6000_4_OR_NEWER
+                        + " (this Unity version has no legacy instance ids: pass the entityId)"
+#endif
+                    );
+                    return false;
+                }
+
+                return true;
+            }
+
+            var (go, findError) = !string.IsNullOrWhiteSpace(path)
+                ? GameObjectFinder.FindOrError(path: path)
+                : GameObjectFinder.FindOrError(name: name);
+            if (findError != null)
+            {
+                error = findError;
+                return false;
+            }
+
+            found = go;
+            return true;
+        }
+
+        private static object NotFoundError(string message) => new
+        {
+            error = message,
+            errorCode = SkillErrorCode.TargetNotFound.ToWireString(),
+            retryStrategy = SkillErrorResponse.RetryFindAndRetry,
+            relatedSkills = new[] { "gameobject_find", "scene_get_hierarchy" }
+        };
 
         public static List<object> CompareSerializedProperties(UnityEngine.Object source, UnityEngine.Object target, int limit = 50)
         {
@@ -362,7 +524,7 @@ namespace UnitySkills
                     return property.stringValue;
                 case SerializedPropertyType.Color:
                     var c = property.colorValue;
-                    return $"{c.r:G9},{c.g:G9},{c.b:G9},{c.a:G9}";
+                    return Join(c.r, c.g, c.b, c.a);
                 case SerializedPropertyType.ObjectReference:
                     return property.objectReferenceValue == null
                         ? "null"
@@ -385,15 +547,15 @@ namespace UnitySkills
                 case SerializedPropertyType.Quaternion:
                     return Format(property.quaternionValue);
                 case SerializedPropertyType.Vector2Int:
-                    return $"{property.vector2IntValue.x},{property.vector2IntValue.y}";
+                    return Join(property.vector2IntValue.x, property.vector2IntValue.y);
                 case SerializedPropertyType.Vector3Int:
-                    return $"{property.vector3IntValue.x},{property.vector3IntValue.y},{property.vector3IntValue.z}";
+                    return Join(property.vector3IntValue.x, property.vector3IntValue.y, property.vector3IntValue.z);
                 case SerializedPropertyType.RectInt:
                     var ri = property.rectIntValue;
-                    return $"{ri.x},{ri.y},{ri.width},{ri.height}";
+                    return Join(ri.x, ri.y, ri.width, ri.height);
                 case SerializedPropertyType.BoundsInt:
                     var bi = property.boundsIntValue;
-                    return $"{bi.position.x},{bi.position.y},{bi.position.z},{bi.size.x},{bi.size.y},{bi.size.z}";
+                    return Join(bi.position.x, bi.position.y, bi.position.z, bi.size.x, bi.size.y, bi.size.z);
                 case SerializedPropertyType.Character:
                     return property.intValue.ToString(CultureInfo.InvariantCulture);
                 case SerializedPropertyType.Gradient:
@@ -771,7 +933,7 @@ namespace UnitySkills
         internal static bool IsTypeDefaultText(string value) =>
             string.IsNullOrWhiteSpace(value) || string.Equals(value.Trim(), "null", StringComparison.OrdinalIgnoreCase);
 
-        private static Type ResolveUnityObjectType(string objectType)
+        internal static Type ResolveUnityObjectType(string objectType)
         {
             if (string.IsNullOrWhiteSpace(objectType)) return null;
             if (string.Equals(objectType, "GameObject", StringComparison.OrdinalIgnoreCase) ||
@@ -790,22 +952,31 @@ namespace UnitySkills
                 return typeof(RectTransform);
             }
 
-            var componentType = ComponentSkills.FindComponentType(objectType);
-            if (componentType != null) return componentType;
+            if (_unityObjectTypes.TryGetValue(objectType, out var known)) return known;
 
-            return SkillsCommon.GetAllLoadedTypes()
+            var resolved = ComponentSkills.FindComponentType(objectType) ?? SkillsCommon.GetAllLoadedTypes()
                 .FirstOrDefault(t =>
                     typeof(UnityEngine.Object).IsAssignableFrom(t) &&
                     (string.Equals(t.Name, objectType, StringComparison.OrdinalIgnoreCase) ||
                      string.Equals(t.FullName, objectType, StringComparison.Ordinal)));
+            if (_unityObjectTypes.Count > 5000) _unityObjectTypes.Clear();
+            _unityObjectTypes[objectType] = resolved;
+            return resolved;
         }
 
-        private static string Format(Vector2 v) => $"{v.x:G9},{v.y:G9}";
-        private static string Format(Vector3 v) => $"{v.x:G9},{v.y:G9},{v.z:G9}";
-        private static string Format(Vector4 v) => $"{v.x:G9},{v.y:G9},{v.z:G9},{v.w:G9}";
-        private static string Format(Rect r) => $"{r.x:G9},{r.y:G9},{r.width:G9},{r.height:G9}";
+        // Culture-invariant: a comma-decimal or non-ASCII-minus current culture must not change the comma-separated values.
+        private static string Join(params float[] values) =>
+            string.Join(",", values.Select(v => v.ToString("G9", CultureInfo.InvariantCulture)));
+
+        private static string Join(params int[] values) =>
+            string.Join(",", values.Select(v => v.ToString(CultureInfo.InvariantCulture)));
+
+        private static string Format(Vector2 v) => Join(v.x, v.y);
+        private static string Format(Vector3 v) => Join(v.x, v.y, v.z);
+        private static string Format(Vector4 v) => Join(v.x, v.y, v.z, v.w);
+        private static string Format(Rect r) => Join(r.x, r.y, r.width, r.height);
         private static string Format(Bounds b) => $"{Format(b.center)},{Format(b.size)}";
-        private static string Format(Quaternion q) => $"{q.x:G9},{q.y:G9},{q.z:G9},{q.w:G9}";
+        private static string Format(Quaternion q) => Join(q.x, q.y, q.z, q.w);
     }
 }
 

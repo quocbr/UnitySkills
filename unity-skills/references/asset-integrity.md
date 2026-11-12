@@ -12,4 +12,4 @@ Treat `class-name-mismatch` as a prompt to inspect the file, not proof that the 
 
 The checker reads selected YAML assets and `MonoScript` references; it does not inspect binary-serialized assets or prove that scripts compile and bind correctly. If the Editor is available, verify import, compilation, and the affected scene or prefab afterward. For live missing-script inspection, follow [validation operations](../skills/validation/GUIDE.md) and the [Editor protocol](../EDITOR.md).
 
-The bundled script is copied unchanged from [awesome-gamedev-agent-skills](https://github.com/gamedev-skills/awesome-gamedev-agent-skills/tree/19d93f97c9c1ea0f8b306e77aa81e0d3e352d3e9/skills/unity/unity-csharp-scripting/scripts) under Apache-2.0; see its [license](gamedev-agent-skills/LICENSE) and [notice](gamedev-agent-skills/NOTICE).
+The bundled script is copied unchanged from [awesome-gamedev-agent-skills v2.0.0](https://github.com/gamedev-skills/awesome-gamedev-agent-skills/tree/2ee85183666929223cc8b1bdb53da5e7d3fb4804/skills/unity/unity-csharp-scripting/scripts) under Apache-2.0. See its [license](gamedev-agent-skills/LICENSE) and [notice](gamedev-agent-skills/NOTICE).

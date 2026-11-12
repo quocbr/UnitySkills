@@ -43,7 +43,7 @@ namespace UnitySkills
         ///   other, never both ({"$param":..,"$ref":..} is SEMANTIC_INVALID). Any $ref left after substitution is
         ///   handled by the $ref stage below.
         /// - Cross-step references: at any depth within a step's structured args, an object whose only key is "$ref"
-        ///   (e.g. {"$ref":"$0.instanceId"}) is substituted before that step executes. "$N" is the 0-based index of
+        ///   (e.g. {"$ref":"$0.entityId"}) is substituted before that step executes. "$N" is the 0-based index of
         ///   an earlier, successful step; after the dot is a Newtonsoft SelectToken path into that step's unwrapped
         ///   result (bare "$0" = whole result, "$1.items[0].path" reaches into arrays).
         ///   An unresolvable reference (malformed / out-of-range / forward reference / referenced step didn't
@@ -53,9 +53,10 @@ namespace UnitySkills
         ///   whole sequence in one call. $ref parameters carry no real value during a dry run: they're stripped from
         ///   the validation body and only get a structural check (index range, ordering, the referenced skill's
         ///   declared Outputs); such steps carry refsValidated and findings in validation.warnings. ?mode=plan isn't supported.
-        /// - ?mode=transactional makes the whole batch all-or-nothing: an unknown skill, or a step whose skill
-        ///   declares MayTriggerReload, is rejected up front with 400 (a reload clears the undo stack, breaking the
-        ///   rollback promise), and continueOnError=true is rejected as self-contradictory. If any step fails —
+        /// - ?mode=transactional makes the whole batch all-or-nothing: an unknown skill, a step whose skill
+        ///   declares MayTriggerReload (a reload clears the undo stack, breaking the rollback promise), a runtime call or
+        ///   a particle playback step (nothing undoes them) is rejected up front with 400, and continueOnError=true is
+        ///   rejected as self-contradictory. If any step fails —
         ///   including a grant interruption, whose token is still returned — every executed step is rolled back via
         ///   Undo.RevertAllDownToGroup and re-marked status:"rolled_back" (a MutatesAssets step gets
         ///   rollbackReliability:"partial": AssetDatabase disk writes aren't fully covered by the undo stack). The
@@ -136,6 +137,20 @@ namespace UnitySkills
                 return;
             }
 
+            // The label of the explicit checkpoint before the batch's first recorded step; a preview records nothing, so it is ignored there.
+            string checkpointLabel = null;
+            if (body.TryGetValue(SkillRouter.CheckpointParameterName, StringComparison.OrdinalIgnoreCase, out var checkpointToken)
+                && checkpointToken.Type != JTokenType.Null)
+            {
+                if (checkpointToken.Type != JTokenType.String)
+                {
+                    WriteBatchTypeMismatch(job, SkillRouter.CheckpointParameterName, checkpointToken,
+                        "Use a JSON string label, for example \"_checkpoint\": \"before lighting\".");
+                    return;
+                }
+                checkpointLabel = checkpointToken.Value<string>();
+            }
+
             // The request-body-level "params" fills $param slots in step args (static, independent of mode).
             JObject batchParams = null;
             if (body.TryGetValue("params", StringComparison.OrdinalIgnoreCase, out var paramsToken) && paramsToken is JObject paramsObj)
@@ -152,17 +167,33 @@ namespace UnitySkills
                 RejectWithoutBatchDryRunToken(job, qs, steps, batchParams, continueOnError, gatedSteps, batchHash))
                 return;
 
+            // A preview records nothing, so only a real batch opens a workflow group (and must not clear a label of another call).
+            bool recording = !dryRun;
+            if (recording)
+            {
+                WorkflowManager.BeginBatchGroup();
+                WorkflowManager.SetPendingCheckpointLabel(checkpointLabel);
+            }
             // agentIdRefiner re-checks ClientProcessResolver's cache before every step's telemetry write (see
             // RefineAgentId) -- a whole batch shares one accepted connection, so the same idempotent recheck
             // that /skill/{name} does once is worth repeating per step here: an early step may run before the
             // background resolver has landed a result, while a later one in the same batch won't. remotePort/
             // agentIdIsExplicit are also forwarded so SkillTelemetryService can do its own flush-time
             // late-binding (the real fix -- see SkillTelemetryService.Record) regardless of how this recheck lands.
-            var response = ExecuteBatchCore(steps, batchParams, continueOnError, dryRun, transactional, job.AgentId, captureDiff,
-                agentIdRefiner: () => { RefineAgentId(job); return job.AgentId; },
-                remotePort: job.RemotePort,
-                agentIdIsExplicit: job.AgentIdIsExplicit,
-                wire: SkillRouter.ResolveWireVersion(job.QueryString));
+            JObject response;
+            try
+            {
+                response = ExecuteBatchCore(steps, batchParams, continueOnError, dryRun, transactional, job.AgentId, captureDiff,
+                    agentIdRefiner: () => { RefineAgentId(job); return job.AgentId; },
+                    remotePort: job.RemotePort,
+                    agentIdIsExplicit: job.AgentIdIsExplicit,
+                    wire: SkillRouter.ResolveWireVersion(job.QueryString));
+            }
+            finally
+            {
+                if (recording)
+                    WorkflowManager.EndBatchGroup();
+            }
             if (gatedSteps != null && dryRun)
                 response.Property("dryRun")?.AddAfterSelf(new JProperty(DryRunPolicyService.TokenQueryKey,
                     DryRunPolicyService.IssueToken(DryRunPolicyService.BatchScope, batchHash)));
@@ -263,12 +294,16 @@ namespace UnitySkills
             int remotePort = -1, bool agentIdIsExplicit = false, int wire = 1)
         {
             int txStartGroup = -1;
+            WorkflowManager.BatchMark txWorkflowMark = null;
             if (transactional)
             {
                 // Plants a fence on the undo timeline for the whole batch. Each step still opens (and collapses)
                 // its own undo group inside Execute; on failure, everything above this fence is rolled back at once.
                 Undo.IncrementCurrentGroup();
                 txStartGroup = Undo.GetCurrentGroup();
+                // A dry run records no workflow history, so it has none to roll back.
+                if (!dryRun)
+                    txWorkflowMark = WorkflowManager.MarkBatchStart();
             }
 
             var results = new List<JObject>(steps.Count);
@@ -305,18 +340,19 @@ namespace UnitySkills
                 if (!(steps[i] is JObject step) || string.IsNullOrWhiteSpace(stepSkillName))
                 {
                     failedCount++;
+                    var stepFailure = BuildErrorPayload(SkillErrorResponse.Build(
+                        SkillErrorCode.MissingParam,
+                        $"steps[{i}] must be an object with a non-empty 'skill' field.",
+                        retryStrategy: SkillErrorResponse.RetryFixAndRetry));
                     results.Add(new JObject
                     {
                         ["index"] = i,
                         ["skill"] = stepSkillName,
                         ["status"] = "error",
-                        ["error"] = BuildErrorPayload(SkillErrorResponse.Build(
-                            SkillErrorCode.MissingParam,
-                            $"steps[{i}] must be an object with a non-empty 'skill' field.",
-                            retryStrategy: SkillErrorResponse.RetryFixAndRetry)),
+                        ["error"] = stepFailure,
                     });
                     if (!continueOnError && !dryRun) halted = true;
-                    RecordBatchStep(stepSkillName, effectiveAgentId, dryRun, false, "MISSING_PARAM", stepSw.ElapsedMilliseconds, remotePort, agentIdIsExplicit);
+                    RecordBatchStep(stepSkillName, effectiveAgentId, dryRun, false, "MISSING_PARAM", stepSw.ElapsedMilliseconds, remotePort, agentIdIsExplicit, null, stepFailure);
                     continue;
                 }
 
@@ -380,15 +416,16 @@ namespace UnitySkills
                         if (paramErrorJson != null)
                         {
                             failedCount++;
+                            var stepFailure = BuildErrorPayload(paramErrorJson);
                             results.Add(new JObject
                             {
                                 ["index"] = i,
                                 ["skill"] = stepSkillName,
                                 ["status"] = "error",
-                                ["error"] = BuildErrorPayload(paramErrorJson),
+                                ["error"] = stepFailure,
                             });
                             if (!continueOnError && !dryRun) halted = true;
-                            RecordBatchStep(stepSkillName, effectiveAgentId, dryRun, false, "SEMANTIC_INVALID", stepSw.ElapsedMilliseconds, remotePort, agentIdIsExplicit);
+                            RecordBatchStep(stepSkillName, effectiveAgentId, dryRun, false, "SEMANTIC_INVALID", stepSw.ElapsedMilliseconds, remotePort, agentIdIsExplicit, argsJson, stepFailure);
                             continue;
                         }
                     }
@@ -464,15 +501,16 @@ namespace UnitySkills
                             if (refErrorJson != null)
                             {
                                 failedCount++;
+                                var stepFailure = BuildErrorPayload(refErrorJson);
                                 results.Add(new JObject
                                 {
                                     ["index"] = i,
                                     ["skill"] = stepSkillName,
                                     ["status"] = "error",
-                                    ["error"] = BuildErrorPayload(refErrorJson),
+                                    ["error"] = stepFailure,
                                 });
                                 if (!continueOnError) halted = true;
-                                RecordBatchStep(stepSkillName, effectiveAgentId, dryRun, false, "SEMANTIC_INVALID", stepSw.ElapsedMilliseconds, remotePort, agentIdIsExplicit);
+                                RecordBatchStep(stepSkillName, effectiveAgentId, dryRun, false, "SEMANTIC_INVALID", stepSw.ElapsedMilliseconds, remotePort, agentIdIsExplicit, argsJson, stepFailure);
                                 continue;
                             }
                             argsJson = argsClone.ToString(Formatting.None);
@@ -481,6 +519,7 @@ namespace UnitySkills
                 }
 
                 string stepJson;
+                long? stepWorkflowMs = null;
                 try
                 {
                     if (dryRun)
@@ -495,6 +534,7 @@ namespace UnitySkills
                             catch { batchDiff.HadWritableSteps = true; }
                         }
                         stepJson = SkillRouter.Execute(stepSkillName, argsJson);
+                        stepWorkflowMs = SkillRouter.ConsumeLastWorkflowEndMs();
                         // Every step shares the same POST job, so the per-request cache invalidation in ProcessJobQueue doesn't run
                         // between steps — without this line, a step couldn't find an object created earlier in the same batch.
                         // A ReadOnly step is side-effect-free by contract and can't stale the cache, so it's skipped; every other
@@ -522,7 +562,8 @@ namespace UnitySkills
                 }
 
                 JObject stepPayload;
-                try { stepPayload = JObject.Parse(stepJson); }
+                // A later step reads this through $ref, so a date-like string must reach it as the text the skill returned.
+                try { stepPayload = SkillsCommon.ParseObjectKeepingStrings(stepJson); }
                 catch { stepPayload = new JObject { ["status"] = "error", ["error"] = stepJson }; }
 
                 string stepStatus = stepPayload["status"]?.ToString();
@@ -548,7 +589,7 @@ namespace UnitySkills
                         failedCount++;
                         results.Add(new JObject { ["index"] = i, ["skill"] = stepSkillName, ["status"] = "error", ["error"] = stepPayload });
                     }
-                    RecordBatchStep(stepSkillName, effectiveAgentId, dryRun, stepValid, stepValid ? null : "DRYRUN_INVALID", stepSw.ElapsedMilliseconds, remotePort, agentIdIsExplicit);
+                    RecordBatchStep(stepSkillName, effectiveAgentId, dryRun, stepValid, stepValid ? null : "DRYRUN_INVALID", stepSw.ElapsedMilliseconds, remotePort, agentIdIsExplicit, argsJson, stepPayload);
                     continue;
                 }
 
@@ -567,7 +608,7 @@ namespace UnitySkills
 
                     if (authorizationRequired || !continueOnError)
                         halted = true;
-                    RecordBatchStep(stepSkillName, effectiveAgentId, dryRun, false, errorCode, stepSw.ElapsedMilliseconds, remotePort, agentIdIsExplicit);
+                    RecordBatchStep(stepSkillName, effectiveAgentId, dryRun, false, errorCode, stepSw.ElapsedMilliseconds, remotePort, agentIdIsExplicit, argsJson, stepPayload);
                     continue;
                 }
 
@@ -585,7 +626,7 @@ namespace UnitySkills
                     ["status"] = "success",
                     ["result"] = unwrappedResult,
                 });
-                RecordBatchStep(stepSkillName, effectiveAgentId, dryRun, true, null, stepSw.ElapsedMilliseconds, remotePort, agentIdIsExplicit);
+                RecordBatchStep(stepSkillName, effectiveAgentId, dryRun, true, null, stepSw.ElapsedMilliseconds, remotePort, agentIdIsExplicit, workflowMs: stepWorkflowMs);
             }
 
             bool rolledBack = false;
@@ -596,6 +637,9 @@ namespace UnitySkills
                 Undo.RevertAllDownToGroup(txStartGroup);
                 GameObjectFinder.InvalidateCache();
                 rolledBack = true;
+                // The workflow history must not offer an undo of what the revert just put back.
+                if (txWorkflowMark != null)
+                    WorkflowManager.RollBackBatch(txWorkflowMark);
 
                 int revertedSteps = 0;
                 foreach (var entry in results)
@@ -1023,8 +1067,9 @@ namespace UnitySkills
         /// <summary>
         /// A transactional batch relies on the editor's undo stack to promise "all or nothing", so anything that
         /// would break that promise is rejected up front (400 SEMANTIC_INVALID) rather than failing mid-execution:
-        /// unknown/malformed steps, a skill that might trigger a domain reload (wipes the undo stack), and
-        /// continueOnError=true (a transaction is fail-fast by definition). Returns true if the batch was rejected.
+        /// unknown/malformed steps, a skill that might trigger a domain reload (wipes the undo stack), a runtime call or
+        /// particle playback (effects the undo stack never records), and continueOnError=true (a transaction is
+        /// fail-fast by definition). Returns true if the batch was rejected.
         /// </summary>
         internal static bool IsRuntimeInvocationSkill(string name) =>
             name == "component_invoke_method" || name == "component_invoke_method_batch" || name == "editor_run_scenario";
@@ -1054,6 +1099,8 @@ namespace UnitySkills
                     reason = "unknown skill";
                 else if (IsRuntimeInvocationSkill(name))
                     reason = "runtime calls have arbitrary side effects and cannot promise transactional rollback";
+                else if (ParticleSkills.IsPlaybackSkill(name))
+                    reason = "particle playback (play, pause, stop, simulate, emit) is runtime state the undo stack does not record, so a rollback could not undo it; run it outside the transaction";
                 else if (info.MayTriggerReload)
                     reason = "the skill declares MayTriggerReload — a domain reload wipes the editor undo stack, so the transactional rollback promise cannot be kept";
 

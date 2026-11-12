@@ -21,7 +21,14 @@ namespace UnitySkills.Tests.OptionalPackages
         {
             var result = Ok(Run("cinemachine_create_vcam", new JObject { ["name"] = "R6VCam" }));
             Assert.That(result["gameObjectName"]?.ToString(), Is.EqualTo("R6VCam"), result.ToString());
+#if UNITY_6000_4_OR_NEWER
+            // Unity 6000.4+ has no legacy instance ids (instanceId is always 0), so check the entityId the skill returns.
+            Assert.That(result["entityId"]?.ToString(), Is.Not.Null.And.Not.Empty, result.ToString());
+            Assert.That(ulong.TryParse(result["entityId"]?.ToString(), out var rawEntityId) && rawEntityId > 0,
+                Is.True, $"entityId must parse to a positive ulong on Unity 6000.4+: {result}");
+#else
             Assert.That(result["instanceId"]?.Value<int>(), Is.Not.EqualTo(0), result.ToString());
+#endif
 
             var info = Ok(Run("cinemachine_inspect_vcam", new JObject { ["vcamName"] = "R6VCam" }));
             Assert.That(info["name"]?.ToString(), Is.EqualTo("R6VCam"), info.ToString());
@@ -259,6 +266,23 @@ namespace UnitySkills.Tests.OptionalPackages
             var cm2FreeLook = ComponentNamed(go, "CinemachineFreeLook");
             Assert.That(cm2FreeLook, Is.Not.Null, "cinemachine_create_freelook must attach a CinemachineCamera (CM3) or CinemachineFreeLook (CM2).");
             return ((Transform)Member(cm2FreeLook, "m_Follow"), (Transform)Member(cm2FreeLook, "m_LookAt"));
+        }
+
+        [Test]
+        public void SetVCamProperty_LensShortcut_EntityId_ReachesTheSecondOfTwoSameNameVCams()
+        {
+            var first = Ok(Run("cinemachine_create_vcam", new JObject { ["name"] = "R6Twin" }))["entityId"]?.ToString();
+            var second = Ok(Run("cinemachine_create_vcam", new JObject { ["name"] = "R6Twin" }))["entityId"]?.ToString();
+            var firstFov = Ok(Run("cinemachine_inspect_vcam", new JObject { ["entityId"] = first }))["lens"]?["FieldOfView"]?.Value<float>();
+            Assert.That(firstFov, Is.Not.EqualTo(33.5f).Within(1e-3f));
+
+            // fov without propertyName is routed to cinemachine_set_lens, which has to receive the entityId as well.
+            Ok(Run("cinemachine_set_vcam_property", new JObject { ["entityId"] = second, ["fov"] = 33.5 }));
+
+            var secondInfo = Ok(Run("cinemachine_inspect_vcam", new JObject { ["entityId"] = second }));
+            Assert.That(secondInfo["lens"]?["FieldOfView"]?.Value<float>(), Is.EqualTo(33.5f).Within(1e-3f), secondInfo.ToString());
+            var firstInfo = Ok(Run("cinemachine_inspect_vcam", new JObject { ["entityId"] = first }));
+            Assert.That(firstInfo["lens"]?["FieldOfView"]?.Value<float>(), Is.EqualTo(firstFov).Within(1e-3f), firstInfo.ToString());
         }
 
         /// <summary>

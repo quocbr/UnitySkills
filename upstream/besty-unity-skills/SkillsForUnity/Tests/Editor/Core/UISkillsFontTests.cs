@@ -1,4 +1,5 @@
-﻿using System.IO;
+﻿using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using NUnit.Framework;
 using UnityEditor;
@@ -30,15 +31,38 @@ namespace UnitySkills.Tests.Core
         {
             var fontAsset = AssetDatabase.LoadAssetAtPath<FontAsset>(UISkillsFont.FontAssetPath);
             Assert.That(fontAsset, Is.Not.Null);
+
+            // Check the serialized character table, not HasCharacter: HasCharacter answers from TextCore's lookup cache,
+            // which can also hold characters resolved from the source font at runtime, so it passes for a character
+            // the atlas never baked and the panel then renders it from the wrong place.
+            var baked = new HashSet<uint>(fontAsset.characterTable.Select(character => character.unicode));
             var characters = UISkillsFontAssetBaker.CollectUiCharacters();
             var missing = characters
-                .Where(value => !fontAsset.HasCharacter(value, false, false))
+                .Where(value => !baked.Contains(value))
                 .Distinct()
                 .ToArray();
 
             Assert.That(missing, Is.Empty,
                 "Missing fixed UI characters: " + string.Join(" ",
                     missing.Select(value => $"{value} (U+{(int)value:X4})")));
+        }
+
+        /// <summary>
+        /// The Chinese All-tasks prompt is agent text built in EvaluationState, outside the scanned UI sources, yet the
+        /// Evaluation tab shows it in this font, so its characters must be baked too.
+        /// </summary>
+        [Test]
+        public void CustomFont_ContainsEveryChineseGroupPromptCharacter()
+        {
+            var fontAsset = AssetDatabase.LoadAssetAtPath<FontAsset>(UISkillsFont.FontAssetPath);
+            Assert.That(fontAsset, Is.Not.Null);
+
+            var baked = new HashSet<uint>(fontAsset.characterTable.Select(character => character.unicode));
+            var prompt = EvaluationPanelGroupTests.GroupPromptOf("zh-CN", "BuiltIn");
+            var missing = prompt.Where(c => c > 127 && !baked.Contains(c)).Distinct().ToArray();
+
+            Assert.That(missing, Is.Empty,
+                "Missing group prompt characters: " + string.Join(" ", missing.Select(c => $"{c} (U+{(int)c:X4})")));
         }
 
         /// <summary>

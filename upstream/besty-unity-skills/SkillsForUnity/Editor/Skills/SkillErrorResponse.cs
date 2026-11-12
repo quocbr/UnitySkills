@@ -1,4 +1,7 @@
-﻿using System.Collections.Generic;
+﻿using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
 using System.Text.RegularExpressions;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
@@ -11,7 +14,7 @@ namespace UnitySkills
     /// </summary>
     public sealed class SuggestedFix
     {
-        /// <summary>The action verb: "retry", "fix_param", "find_target", "install_package", "wait", "confirm".</summary>
+        /// <summary>The action verb: "retry", "fix_param", "find_target", "install_package", "wait", "confirm", "ask_user".</summary>
         public string action;
 
         /// <summary>Optional: an alternative skill suggested for the caller to consider.</summary>
@@ -103,6 +106,76 @@ namespace UnitySkills
             }
 
             return JsonConvert.SerializeObject(payload, _jsonSettings);
+        }
+
+        /// <summary>Envelope field naming the editor that answered, so an agent can tell which of several running editors it reached.</summary>
+        internal const string InstanceField = "instance";
+
+        /// <summary>Reason of the "ask_user" fix that leads every MISSING_PACKAGE answer: installing is the user's call, not the agent's.</summary>
+        internal const string AskBeforeInstallReason =
+            "Tell the user which package is missing; install it only if they ask: installing changes their project and reloads the domain.";
+
+        internal static SuggestedFix AskUserBeforeInstall() => new SuggestedFix { action = "ask_user", reason = AskBeforeInstallReason };
+
+        /// <summary>Top-level <c>reason</c> of <see cref="UnsupportedPackageVersion"/>, so callers such as the smoke test can tell a wrong version from a broken skill.</summary>
+        internal const string UnsupportedPackageVersionReason = "unsupported_package_version";
+
+        /// <summary>
+        /// An optional package is present at a version its module was not written against. Not MISSING_PACKAGE: installing again would not
+        /// help, and changing the version is the user's call. The message avoids the classifier's dependency markers; so must <paramref name="hint"/>.
+        /// </summary>
+        internal static object UnsupportedPackageVersion(string packageId, string installedVersion, string supportedRange, string hint) => new
+        {
+            error = $"{packageId} {installedVersion} is present, but this module supports {supportedRange}. {hint}".TrimEnd(),
+            errorCode = SkillErrorCode.SkillError.ToWireString(),
+            retryStrategy = Abort,
+            suggestedFixes = new[]
+            {
+                new SuggestedFix
+                {
+                    action = "ask_user",
+                    reason = "Tell the user which version is present and which range this module supports; changing the package version is their call."
+                }
+            },
+            reason = UnsupportedPackageVersionReason,
+            packageId,
+            installedVersion,
+            supportedRange
+        };
+
+        /// <summary>
+        /// Short "productName@port" label; the folder name follows the product in parentheses only when it differs from it.
+        /// </summary>
+        internal static string InstanceLabel(string productName, string projectPath, int port)
+        {
+            var name = string.IsNullOrEmpty(productName) ? "unknown" : productName;
+            var label = name;
+            var folder = string.IsNullOrEmpty(projectPath)
+                ? string.Empty
+                : Path.GetFileName(projectPath.TrimEnd('/', '\\'));
+            if (!string.IsNullOrEmpty(folder) && !string.Equals(folder, name, StringComparison.OrdinalIgnoreCase))
+                label = $"{name} ({folder})";
+            return $"{label}@{port}";
+        }
+
+        /// <summary>The label of the editor serving this request. Main thread only: reads Unity-backed registry state.</summary>
+        internal static string CurrentInstanceLabel() =>
+            InstanceLabel(RegistryService.ProjectName, RegistryService.ProjectPath, SkillsHttpServer.Port);
+
+        /// <summary>
+        /// Adds <see cref="InstanceField"/> to a TARGET_NOT_FOUND extra dictionary. Returns a copy so the skill's own dictionary is
+        /// never mutated, and leaves the dictionary alone when the skill already declared its own <c>instance</c> value.
+        /// </summary>
+        internal static IDictionary<string, object> WithTargetNotFoundInstance(SkillErrorCode code, IDictionary<string, object> extra, string instance)
+        {
+            if (code != SkillErrorCode.TargetNotFound || string.IsNullOrEmpty(instance))
+                return extra;
+            if (extra != null && extra.Keys.Any(key => string.Equals(key, InstanceField, StringComparison.OrdinalIgnoreCase)))
+                return extra;
+
+            var merged = extra != null ? new Dictionary<string, object>(extra) : new Dictionary<string, object>();
+            merged[InstanceField] = instance;
+            return merged;
         }
 
         /// <summary>Skill name lookup missed; may attach candidate suggestions from a fuzzy match.</summary>
@@ -376,6 +449,8 @@ namespace UnitySkills
                     return MissingParam();
                 case SkillErrorCode.SemanticInvalid:
                     return SemanticInvalid();
+                case SkillErrorCode.WorkflowConflict:
+                    return WorkflowConflict();
                 default:
                     return Classify(message);
             }
@@ -398,6 +473,7 @@ namespace UnitySkills
             RelatedSkills = new List<string> { "package_install", "package_list" },
             SuggestedFixes = new List<SuggestedFix>
             {
+                SkillErrorResponse.AskUserBeforeInstall(),
                 new SuggestedFix
                 {
                     action = "install_package",
@@ -620,6 +696,20 @@ namespace UnitySkills
                     action = "fix_param",
                     skill = "POST /skill/<name>?mode=dryRun",
                     reason = "The value is rejected, not the parameter name. Read the accepted range/enum in the message, then dryRun the corrected args."
+                },
+            },
+        };
+
+        private static SkillErrorClassification WorkflowConflict() => new SkillErrorClassification
+        {
+            Code = SkillErrorCode.WorkflowConflict,
+            RetryStrategy = SkillErrorResponse.RetryFixAndRetry,
+            SuggestedFixes = new List<SuggestedFix>
+            {
+                new SuggestedFix
+                {
+                    action = "ask_user",
+                    reason = "Ask the user which conflicting changes to keep. Then retry with conflicts:\"keep\" or with the ids to overwrite.",
                 },
             },
         };

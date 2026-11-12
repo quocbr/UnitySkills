@@ -4,6 +4,7 @@ using UnityEditorInternal;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using UnitySkills.Internal;
 
 namespace UnitySkills
 {
@@ -15,6 +16,8 @@ namespace UnitySkills
     {
         static EditorSkills()
         {
+            if (ImportWorkerGate.IsWorkerProcess) return;
+
             RecoverStalePlaymodeStepJobs();
         }
 
@@ -252,9 +255,9 @@ namespace UnitySkills
             RequiresInput = new[] { "gameObject" },
             ReadOnly = true,
             Mode = SkillMode.SemiAuto)]
-        public static object EditorPlaymodeInspect(string name = null, int instanceId = 0, string path = null, string componentType = null)
+        public static object EditorPlaymodeInspect(string name = null, int instanceId = 0, string path = null, string componentType = null, string entityId = null)
         {
-            var (go, findErr) = GameObjectFinder.FindOrError(name: name, instanceId: instanceId, path: path);
+            var (go, findErr) = GameObjectFinder.FindOrError(name: name, instanceId: instanceId, path: path, entityId: entityId);
             if (findErr != null) return findErr;
 
             var t = go.transform;
@@ -289,9 +292,9 @@ namespace UnitySkills
             Tags = new[] { "select", "focus", "highlight" },
             Outputs = new[] { "selected" },
             RequiresInput = new[] { "gameObject" })]
-        public static object EditorSelect(string name = null, int instanceId = 0, string path = null)
+        public static object EditorSelect(string name = null, int instanceId = 0, string path = null, string entityId = null)
         {
-            var (go, findErr) = GameObjectFinder.FindOrError(name: name, instanceId: instanceId, path: path);
+            var (go, findErr) = GameObjectFinder.FindOrError(name: name, instanceId: instanceId, path: path, entityId: entityId);
             if (findErr != null) return findErr;
 
             Selection.activeGameObject = go;
@@ -346,10 +349,10 @@ namespace UnitySkills
             return new { success = true, message = "Redo performed" };
         }
 
-        [UnitySkill("editor_get_state", "Get current editor state",
+        [UnitySkill("editor_get_state", "Get current editor state, including domainReload timing (restartRecommended: reloads have slowed down and only restarting Unity resets them).",
             Category = SkillCategory.Editor, Operation = SkillOperation.Query,
             Tags = new[] { "state", "status", "info" },
-            Outputs = new[] { "isPlaying", "isPaused", "isCompiling", "unityVersion" },
+            Outputs = new[] { "isPlaying", "isPaused", "isCompiling", "unityVersion", "domainReload" },
             ReadOnly = true,
             Mode = SkillMode.SemiAuto)]
         public static object EditorGetState()
@@ -361,7 +364,8 @@ namespace UnitySkills
                 isCompiling = EditorApplication.isCompiling,
                 timeSinceStartup = EditorApplication.timeSinceStartup,
                 unityVersion = Application.unityVersion,
-                platform = Application.platform.ToString()
+                platform = Application.platform.ToString(),
+                domainReload = DomainReloadStats.Current
             };
         }
 

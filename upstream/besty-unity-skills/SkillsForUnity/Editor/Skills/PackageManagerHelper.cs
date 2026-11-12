@@ -1,7 +1,8 @@
-using UnityEngine;
+﻿using UnityEngine;
 using UnityEditor;
 using UnityEditor.PackageManager;
 using UnityEditor.PackageManager.Requests;
+using UnitySkills.Internal;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -46,14 +47,17 @@ namespace UnitySkills
             _isRefreshing;
         public static string CurrentOperation => _currentOperation;
         public static string CurrentPackageId => _currentPackageId;
+        /// <summary>Per project (<see cref="ProjectPrefs"/>); off by default.</summary>
         public static bool AutoInstallPackagesOnStartup
         {
-            get => EditorPrefs.GetBool(PrefKeyAutoInstallPackagesOnStartup, false);
-            set => EditorPrefs.SetBool(PrefKeyAutoInstallPackagesOnStartup, value);
+            get => ProjectPrefs.GetBool(PrefKeyAutoInstallPackagesOnStartup, false);
+            set => ProjectPrefs.SetBool(PrefKeyAutoInstallPackagesOnStartup, value);
         }
 
         static PackageManagerHelper()
         {
+            if (ImportWorkerGate.IsWorkerProcess) return;
+
             try
             {
                 EnsureTestable();
@@ -166,6 +170,43 @@ namespace UnitySkills
             if (_installedPackages != null && _installedPackages.TryGetValue(packageId, out var info))
                 return info.version;
             return ResolveDirectly(packageId)?.version;
+        }
+
+        /// <summary>
+        /// Whether <paramref name="version"/> lies in [<paramref name="minInclusive"/>, <paramref name="maxExclusive"/>), ordered like an asmdef
+        /// versionDefine: a prerelease sorts before its release ("3.0.4-beta" &lt; "3.0.4"). Unparsable input is outside every range.
+        /// </summary>
+        public static bool IsVersionInRange(string version, string minInclusive, string maxExclusive)
+        {
+            if (!TryParseSemver(version, out var v, out var vPre) ||
+                !TryParseSemver(minInclusive, out var min, out var minPre) ||
+                !TryParseSemver(maxExclusive, out var max, out var maxPre))
+                return false;
+            return CompareSemver(v, vPre, min, minPre) >= 0 && CompareSemver(v, vPre, max, maxPre) < 0;
+        }
+
+        private static bool TryParseSemver(string text, out Version core, out bool prerelease)
+        {
+            core = null;
+            prerelease = false;
+            if (string.IsNullOrWhiteSpace(text)) return false;
+            var trimmed = text.Trim();
+            int cut = trimmed.IndexOfAny(new[] { '-', '+' });
+            prerelease = cut >= 0 && trimmed[cut] == '-';
+            var numbers = (cut >= 0 ? trimmed.Substring(0, cut) : trimmed).Split('.');
+            if (numbers.Length < 2 || numbers.Length > 3) return false;
+            var parts = new int[3];
+            for (int i = 0; i < numbers.Length; i++)
+                if (!int.TryParse(numbers[i], out parts[i]) || parts[i] < 0) return false;
+            core = new Version(parts[0], parts[1], parts[2]);
+            return true;
+        }
+
+        private static int CompareSemver(Version a, bool aPre, Version b, bool bPre)
+        {
+            int byCore = a.CompareTo(b);
+            if (byCore != 0) return byCore;
+            return aPre == bPre ? 0 : (aPre ? -1 : 1);
         }
 
         /// <summary>

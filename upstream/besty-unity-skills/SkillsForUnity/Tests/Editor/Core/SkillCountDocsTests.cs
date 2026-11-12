@@ -9,9 +9,9 @@ using UnityEditor.PackageManager;
 namespace UnitySkills.Tests.Core
 {
     /// <summary>
-    /// The skill counts quoted in AGENTS.md, both READMEs and the root SKILL.md, checked against the live registry
-    /// so a stale count goes red here instead of waiting for someone to run /skillcheck. Counting follows /skillcheck
-    /// step 4: one per unique skill name (the #if/#else package stubs never coexist in one build), categories by
+    /// The skill counts quoted in AGENTS.md and both READMEs (the root SKILL.md carries none), checked against the live registry
+    /// so a stale count goes red here instead of waiting for someone to run /skillcheck. Counting follows
+    /// skill_inventory.py: one per unique skill name (the #if/#else package stubs never coexist in one build), categories by
     /// SkillCategory (Batch and Diagnose fold into Workflow, Validation and Debug), source files as
     /// Editor/Skills/*Skills.cs. Every quoted claim must be found exactly once, so a reworded sentence cannot fall out
     /// of the check silently.
@@ -46,8 +46,6 @@ namespace UnitySkills.Tests.Core
             Make("README_CN.md", @"\((\d+) 个 \*Skills\.cs → (\d+) 个 SkillCategory 分类，共 (\d+) Skills\)",
                 Quantity.SourceFiles, Quantity.Categories, Quantity.Skills),
             Make("README_CN.md", @"# (\d+) Skills 源码", Quantity.Skills),
-            Make("SkillsForUnity/unity-skills~/SKILL.md", @"`(\d+)` REST skills, `(\d+)` source files, `(\d+)` categories",
-                Quantity.Skills, Quantity.SourceFiles, Quantity.Categories),
         };
 
         /// <summary>A category-table row in either README: <c>| **Name** | 12 | ...</c>.</summary>
@@ -69,7 +67,7 @@ namespace UnitySkills.Tests.Core
             Assert.That(issues, Is.Empty,
                 $"Quoted counts disagree with the registry ({actual[Quantity.Skills]} skills, " +
                 $"{actual[Quantity.Categories]} categories, {actual[Quantity.SourceFiles]} *Skills.cs files). " +
-                "Run /skillcheck step 4:\n" + string.Join("\n", issues));
+                "Run /skillcheck (skill_inventory.py --sync-counts):\n" + string.Join("\n", issues));
         }
 
         [Test]

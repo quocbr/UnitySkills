@@ -1,6 +1,7 @@
 ﻿using System;
 using UnityEngine;
 using UnityEditor;
+using UnitySkills.Internal;
 using UnityEngine.UIElements;
 using System.Linq;
 using System.Reflection;
@@ -11,7 +12,7 @@ namespace UnitySkills
     /// <summary>
     /// Unity Editor Window — UnitySkills layout.
     /// Topbar (server status + URL + toggle + settings) — persistent.
-    /// 6 tabs: Skills / AI Config / Permissions / Unity CLI / History / Analytics.
+    /// 6 tabs: Skills / AI Config / Unity CLI / History / Analytics / Evaluation.
     /// Footer: version + live stats pill + segmented language switch.
     /// Settings panel: slide-in drawer from the right.
     /// </summary>
@@ -37,6 +38,7 @@ namespace UnitySkills
             UnityCli,
             History,
             Analytics,
+            Evaluation,
         }
 
         private sealed class MainTabDefinition
@@ -67,6 +69,7 @@ namespace UnitySkills
             new MainTabDefinition(MainTabId.UnityCli, "tab-btn-unity-cli", "tab-wrap-unity-cli", "tab-content-unity-cli", "tab-underline-unity-cli", "tab_unity_cli"),
             new MainTabDefinition(MainTabId.History, "tab-btn-history", "tab-wrap-history", "tab-content-history", "tab-underline-history", "tab_history"),
             new MainTabDefinition(MainTabId.Analytics, "tab-btn-analytics", "tab-wrap-analytics", "tab-content-analytics", "tab-underline-analytics", "tab_analytics"),
+            new MainTabDefinition(MainTabId.Evaluation, "tab-btn-evaluation", "tab-wrap-evaluation", "tab-content-evaluation", "tab-underline-evaluation", "tab_evaluation"),
         };
 
         private const float FixedTabWidth = 120f;
@@ -100,6 +103,7 @@ namespace UnitySkills
         private UnityCliTabController    _cliController;
         private HistoryTabController     _historyController;
         private AnalyticsTabController   _analyticsController;
+        private EvaluationTabController  _evaluationController;
 
         // ----- Tab strip -----
         private VisualElement[] _tabContents;
@@ -151,6 +155,8 @@ namespace UnitySkills
             _skillsController = null;
             _cliController?.Dispose();
             _cliController = null;
+            _evaluationController?.Dispose();
+            _evaluationController = null;
             _drawer?.Dispose();
             _drawer = null;
         }
@@ -204,6 +210,7 @@ namespace UnitySkills
             _cliController = new UnityCliTabController(GetTabContent(MainTabId.UnityCli), this);
             _historyController = new HistoryTabController(GetTabContent(MainTabId.History), this);
             _analyticsController = new AnalyticsTabController(GetTabContent(MainTabId.Analytics), this);
+            _evaluationController = new EvaluationTabController(GetTabContent(MainTabId.Evaluation), this);
 
             // --- Tab clicks ---
             for (int i = 0; i < _tabButtons.Length; i++)
@@ -405,6 +412,10 @@ namespace UnitySkills
             // Analytics pulls aggregates on demand (30s cache in SkillTelemetryService),
             // so activating the tab is the natural refresh point — no live tick involved.
             if (MainTabs[index].Id == MainTabId.Analytics) _analyticsController?.OnTabSelected();
+            // The Evaluation tab re-reads the runner's state files and consumes finished commands on activation.
+            if (MainTabs[index].Id == MainTabId.Evaluation) _evaluationController?.OnTabSelected();
+            // The timeline is rebuilt on activation; history changes while the tab is hidden only mark it dirty.
+            if (MainTabs[index].Id == MainTabId.History) _historyController?.OnTabSelected();
         }
 
         private int GetTabIndex(MainTabId id)
@@ -566,6 +577,7 @@ namespace UnitySkills
             _cliController?.RefreshLocalization();
             _historyController?.RefreshLocalization();
             _analyticsController?.RefreshLocalization();
+            _evaluationController?.RefreshLocalization();
         }
 
         // ===== Skill catalog (preserved API for controllers) =====
@@ -668,8 +680,9 @@ namespace UnitySkills
         private void MaybeShowFirstRunToast()
         {
             if (EditorPrefs.HasKey(PrefKeyFirstRunToast)) return;
-            // A mode has already been explicitly chosen -> this isn't a fresh install's first launch, no need to prompt.
-            if (EditorPrefs.HasKey("UnitySkills_OperatingMode")) return;
+            // A mode has already been explicitly chosen (in this project, or machine-wide before 3.0) -> this isn't a
+            // fresh install's first launch, no need to prompt.
+            if (ProjectPrefs.HasKey("UnitySkills_OperatingMode")) return;
             if (PermissionUiHelpers.IsExistingInstall()) return;
 
             // Set the flag before showing the dialog: the dialog runs inside delayCall, and the user might close the window in the meantime; writing the pref immediately guarantees
@@ -702,21 +715,10 @@ namespace UnitySkills
     internal static class PermissionUiHelpers
     {
         /// <summary>
-        /// UI-side determination kept in sync with <c>SkillsModeManager</c>'s internal IsExistingInstall, used to decide whether to hide the first-run toast for existing
-        /// users; just keep the two key lists consistent.
+        /// The "existing install" probe <c>SkillsModeManager</c> uses for its upgrade defaults, used here to decide
+        /// whether to hide the first-run toast for existing users.
         /// </summary>
-        public static bool IsExistingInstall()
-        {
-            return EditorPrefs.HasKey("UnitySkills_RequireConfirmation")
-                || EditorPrefs.HasKey("UnitySkills_PreferredPort")
-                || EditorPrefs.HasKey("UnitySkills_LogLevel")
-                || EditorPrefs.HasKey("UnitySkills_TelemetryEnabled")
-                || EditorPrefs.HasKey("UnitySkills_Language")
-                || EditorPrefs.HasKey("UnitySkills_GuideMode")
-                || EditorPrefs.HasKey("UnitySkills_RequestTimeoutMinutes")
-                || EditorPrefs.HasKey("UnitySkills_KeepAliveIntervalSeconds")
-                || EditorPrefs.HasKey("UnitySkills_AutoInstallPackagesOnStartup");
-        }
+        public static bool IsExistingInstall() => SkillsModeManager.IsExistingInstallForDefaults();
 
         public static string FormatCountdown(DateTime expiresAtUtc)
         {

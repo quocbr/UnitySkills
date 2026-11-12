@@ -27,6 +27,7 @@ namespace UnitySkills.Tests.Core
             RuntimeScenarioService.LogSeqForTests = () => 10;
             RuntimeScenarioService.ExecuteForTests = (skill, args) => { _dispatches++; return "{\"status\":\"success\",\"result\":{\"value\":12}}"; };
             ServerAvailabilityHelper.CompilationInProgressOverrideForTests = false;
+            RuntimeScenarioService.CompileFailedForTests = () => false;
         }
 
         [TearDown]
@@ -43,6 +44,7 @@ namespace UnitySkills.Tests.Core
             RuntimeScenarioService.LogSeqForTests = null;
             RuntimeScenarioService.ExecuteForTests = null;
             ServerAvailabilityHelper.CompilationInProgressOverrideForTests = null;
+            RuntimeScenarioService.CompileFailedForTests = null;
             BatchPersistence.FlushIfDirty();
         }
 
@@ -54,6 +56,15 @@ namespace UnitySkills.Tests.Core
             return AsyncJobService.Get(id);
         }
         private const string Assertion = "{\"kind\":\"assert\",\"skill\":\"editor_get_state\",\"select\":\"value\",\"expected\":12}";
+
+        private BatchJobRecord StartPlay(int timeoutSeconds)
+        {
+            var response = JObject.FromObject(RuntimeScenarioService.Start("[" + Assertion + "]", "play", timeoutSeconds));
+            Assert.That(response["error"], Is.Null, response.ToString());
+            string id = response.Value<string>("jobId"); _jobs.Add(id);
+            _playing = false;
+            return AsyncJobService.Get(id);
+        }
 
         [Test]
         public void PreviewHasNoDispatchJobsOrEditorStateChanges()
@@ -179,6 +190,37 @@ namespace UnitySkills.Tests.Core
         }
 
         [Test]
+        public void ReadOnlyStepAdvancesInMemoryWithoutFlushing()
+        {
+            var job = Start("[" + Assertion + "," + Assertion + "]");
+            BatchPersistence.FlushIfDirty();
+            RuntimeScenarioService.Process(job);
+            Assert.That(Convert.ToInt32(job.metadata["stepIndex"]), Is.EqualTo(1));
+            Assert.That(job.metadata.ContainsKey("stepExecuting") && Convert.ToBoolean(job.metadata["stepExecuting"]), Is.False);
+            Assert.That(BatchPersistence.HasUnflushedChangesForTests, Is.True);
+            BatchPersistence.FlushIfDirty();
+            Assert.That(BatchPersistence.HasUnflushedChangesForTests, Is.False);
+        }
+
+        [Test]
+        public void InvokeStepIsFlushedBeforeDispatchAndAfterIt()
+        {
+            var job = Start("[{\"kind\":\"invoke\",\"skill\":\"component_invoke_method\"}," + Assertion + "]");
+            bool flushedAtDispatch = false, markedAtDispatch = false;
+            RuntimeScenarioService.ExecuteForTests = (skill, args) =>
+            {
+                flushedAtDispatch = !BatchPersistence.HasUnflushedChangesForTests;
+                markedAtDispatch = Convert.ToBoolean(job.metadata["stepExecuting"]);
+                return "{\"status\":\"success\",\"result\":{\"value\":12}}";
+            };
+            RuntimeScenarioService.Process(job);
+            Assert.That(flushedAtDispatch, Is.True);
+            Assert.That(markedAtDispatch, Is.True);
+            Assert.That(Convert.ToInt32(job.metadata["stepIndex"]), Is.EqualTo(1));
+            Assert.That(BatchPersistence.HasUnflushedChangesForTests, Is.False);
+        }
+
+        [Test]
         public void FramesWaitForActualFrameCounter()
         {
             var job = Start("[{\"kind\":\"wait_frames\",\"frames\":2}," + Assertion + "]");
@@ -203,12 +245,92 @@ namespace UnitySkills.Tests.Core
             Assert.That(_dispatches, Is.EqualTo(1));
         }
 
+        [Test]
+        public void PlayEntryDeadlineIsIndependentOfScenarioBudget()
+        {
+            var job = StartPlay(1);
+            RuntimeScenarioService.Process(job);
+            Assert.That(job.metadata["scenarioStage"], Is.EqualTo("entering_play_mode"));
+            Assert.That(job.status, Is.Not.EqualTo("failed"));
+            long deadline = Convert.ToInt64(job.metadata["deadlineTicks"]);
+            Assert.That(Math.Abs(deadline - DateTime.UtcNow.AddSeconds(RuntimeScenarioService.PlayEntryTimeoutSeconds).Ticks), Is.LessThan(TimeSpan.FromSeconds(5).Ticks));
+        }
+
+        [Test]
+        public void RunningStageResetsDeadlineToScenarioBudget()
+        {
+            var job = StartPlay(1);
+            _playing = true;
+            RuntimeScenarioService.Process(job);
+            Assert.That(job.metadata["scenarioStage"], Is.EqualTo("running"));
+            long deadline = Convert.ToInt64(job.metadata["deadlineTicks"]);
+            Assert.That(Math.Abs(deadline - DateTime.UtcNow.AddSeconds(1).Ticks), Is.LessThan(TimeSpan.FromSeconds(5).Ticks));
+        }
+
+        [Test]
+        public void EnteringPlayModePastDeadlineFailsWithPlayEntryMessage()
+        {
+            var job = StartPlay(30);
+            job.metadata["deadlineTicks"] = DateTime.UtcNow.AddSeconds(-1).Ticks;
+            RuntimeScenarioService.Process(job);
+            Assert.That(job.status, Is.EqualTo("failed"));
+            Assert.That(job.resultData["error"], Is.EqualTo("Play Mode did not start within 300 s; steps will not be replayed."));
+            Assert.That(_dispatches, Is.EqualTo(0));
+        }
+
+        [Test]
+        public void LegacyEnteringJobKeepsScenarioTimeoutMessage()
+        {
+            var job = StartPlay(30);
+            job.metadata.Remove("timeoutSeconds");
+            job.metadata["deadlineTicks"] = DateTime.UtcNow.AddSeconds(-1).Ticks;
+            RuntimeScenarioService.Process(job);
+            Assert.That(job.status, Is.EqualTo("failed"));
+            Assert.That(job.resultData["error"], Is.EqualTo("Scenario timeout; steps will not be replayed."));
+        }
+
+        [Test]
+        public void PlayScenarioIsRejectedWhileScriptsHaveCompileErrors()
+        {
+            RuntimeScenarioService.CompileFailedForTests = () => true;
+            int count = BatchPersistence.ListJobs(int.MaxValue).Length;
+            var response = JObject.FromObject(RuntimeScenarioService.Start("[" + Assertion + "]", "play", 30));
+            Assert.That(response.Value<string>("error"), Does.Contain("compile errors"), response.ToString());
+            Assert.That(BatchPersistence.ListJobs(int.MaxValue).Length, Is.EqualTo(count));
+            Assert.That(_playing, Is.False);
+            Assert.That(_dispatches, Is.Zero);
+            Assert.That(Start("[" + Assertion + "]").status, Is.Not.EqualTo("failed"));
+        }
+
         [TestCase(false, false)]
         [TestCase(true, true)]
         public void ErrorsOrCoverageGapsPreventVerifiedPass(bool complete, bool error)
         {
             _logs["complete"] = complete;
             if (error) ((JArray)_logs["Logs"]).Add(new JObject { ["type"] = "Exception", ["message"] = "fixture" });
+            var job = Start("[" + Assertion + "]");
+            RuntimeScenarioService.Process(job);
+            RuntimeScenarioService.Process(job);
+            Assert.That(job.status, Is.EqualTo("failed"));
+            Assert.That(job.resultData["passed"], Is.False);
+        }
+
+        [Test]
+        public void TruncatedCompleteWindowWithoutErrorsStillPasses()
+        {
+            _logs["hasMore"] = true;
+            var job = Start("[" + Assertion + "]");
+            RuntimeScenarioService.Process(job);
+            RuntimeScenarioService.Process(job);
+            Assert.That(job.status, Is.EqualTo("completed"));
+            Assert.That(job.resultData["passed"], Is.True);
+        }
+
+        [Test]
+        public void TruncatedWindowWithExceptionStillFails()
+        {
+            _logs["hasMore"] = true;
+            ((JArray)_logs["Logs"]).Add(new JObject { ["type"] = "Exception", ["message"] = "fixture" });
             var job = Start("[" + Assertion + "]");
             RuntimeScenarioService.Process(job);
             RuntimeScenarioService.Process(job);

@@ -224,17 +224,22 @@ namespace UnitySkills
 
     /// <summary>
     /// Unified GameObject lookup utility, supporting lookup by name, entityId, legacy instanceId,
-    /// Hierarchy path, tag, or component type, with a step-by-step fallback search strategy.
+    /// Hierarchy path, tag, or component type. An id decides alone; a missed path falls back to the name.
+    /// Scenes are walked in Hierarchy order, so the top-most of several matches wins.
     /// </summary>
     public static class GameObjectFinder
     {
         private sealed class SceneObjectCache
         {
+            // Hierarchy order: scenes in load order, then DontDestroyOnLoad; roots and children top-down, parents first.
             public readonly List<GameObject> Objects = new List<GameObject>();
             public readonly Dictionary<string, string> PathsByEntityId =
                 new Dictionary<string, string>(System.StringComparer.Ordinal);
             public readonly Dictionary<string, int> DepthsByEntityId =
                 new Dictionary<string, int>(System.StringComparer.Ordinal);
+            // The first object at each path in Hierarchy order; an exact-case path wins over one that matches only ignoring case.
+            public readonly Dictionary<string, GameObject> ExactPathLookup =
+                new Dictionary<string, GameObject>(System.StringComparer.Ordinal);
             public readonly Dictionary<string, GameObject> PathLookup =
                 new Dictionary<string, GameObject>(System.StringComparer.OrdinalIgnoreCase);
         }
@@ -307,10 +312,11 @@ namespace UnitySkills
             }
 
             var cache = new SceneObjectCache();
-            var roots = GetLoadedSceneRoots();
+            var roots = GetLoadedSceneRoots().ToList();
+            // Pushed in reverse so the stack pops in Hierarchy order.
             var stack = new Stack<(Transform transform, string path, string sceneName, int depth)>();
-            foreach (var root in roots)
-                stack.Push((root.transform, root.name, root.scene.name, 0));
+            for (int i = roots.Count - 1; i >= 0; i--)
+                stack.Push((roots[i].transform, roots[i].name, roots[i].scene.name, 0));
 
             while (stack.Count > 0)
             {
@@ -324,13 +330,16 @@ namespace UnitySkills
                     cache.PathsByEntityId[entityId] = path;
                     cache.DepthsByEntityId[entityId] = depth;
                 }
-                AddPathLookup(cache.PathLookup, path, gameObject);
+                AddPathLookup(cache, path, gameObject);
 
                 if (!string.IsNullOrEmpty(sceneName))
-                    AddPathLookup(cache.PathLookup, sceneName + "/" + path, gameObject);
+                    AddPathLookup(cache, sceneName + "/" + path, gameObject);
 
-                foreach (Transform child in transform)
+                for (int i = transform.childCount - 1; i >= 0; i--)
+                {
+                    var child = transform.GetChild(i);
                     stack.Push((child, path + "/" + child.name, sceneName, depth + 1));
+                }
             }
 
             _cachedSceneData = cache;
@@ -383,12 +392,15 @@ namespace UnitySkills
             return depth;
         }
 
-        private static void AddPathLookup(Dictionary<string, GameObject> lookup, string path, GameObject go)
+        private static void AddPathLookup(SceneObjectCache cache, string path, GameObject go)
         {
-            if (string.IsNullOrEmpty(path) || lookup.ContainsKey(path))
+            if (string.IsNullOrEmpty(path))
                 return;
 
-            lookup[path] = go;
+            if (!cache.ExactPathLookup.ContainsKey(path))
+                cache.ExactPathLookup[path] = go;
+            if (!cache.PathLookup.ContainsKey(path))
+                cache.PathLookup[path] = go;
         }
 
         /// <summary>
@@ -423,12 +435,15 @@ namespace UnitySkills
                     cache.PathsByEntityId[entityId] = path;
                     cache.DepthsByEntityId[entityId] = level;
                 }
-                AddPathLookup(cache.PathLookup, path, current);
+                AddPathLookup(cache, path, current);
                 if (!string.IsNullOrEmpty(sceneName))
-                    AddPathLookup(cache.PathLookup, sceneName + "/" + path, current);
+                    AddPathLookup(cache, sceneName + "/" + path, current);
 
-                foreach (Transform child in transform)
+                for (int i = transform.childCount - 1; i >= 0; i--)
+                {
+                    var child = transform.GetChild(i);
                     stack.Push((child, path + "/" + child.name, level + 1));
+                }
             }
         }
 
@@ -447,15 +462,35 @@ namespace UnitySkills
 
         private static IEnumerable<GameObject> GetLoadedSceneRoots()
         {
+#if UNITY_6000_4_OR_NEWER
+            // On Unity 6000.4+ the sceneCount/GetSceneAt scan can skip a freshly created active scene,
+            // so enumerate the active scene as a fallback when the scan did not reach it (never double counts).
+            var activeScene = SceneManager.GetActiveScene();
+            bool activeSceneEnumerated = false;
+#endif
+
             for (int sceneIndex = 0; sceneIndex < SceneManager.sceneCount; sceneIndex++)
             {
                 var scene = SceneManager.GetSceneAt(sceneIndex);
                 if (!scene.IsValid() || !scene.isLoaded)
                     continue;
 
+#if UNITY_6000_4_OR_NEWER
+                if (scene == activeScene)
+                    activeSceneEnumerated = true;
+#endif
+
                 foreach (var root in scene.GetRootGameObjects())
                     yield return root;
             }
+
+#if UNITY_6000_4_OR_NEWER
+            if (!activeSceneEnumerated && activeScene.IsValid() && activeScene.isLoaded)
+            {
+                foreach (var root in activeScene.GetRootGameObjects())
+                    yield return root;
+            }
+#endif
 
             foreach (var root in GetDontDestroyOnLoadRoots())
                 yield return root;
@@ -474,6 +509,10 @@ namespace UnitySkills
         internal static List<GameObject> GetDontDestroyOnLoadRoots()
         {
             var roots = new List<GameObject>();
+            // Outside Play mode the scan below would walk every loaded object to find nothing.
+            if (!EditorApplication.isPlaying)
+                return roots;
+
             foreach (var go in Internal.FindHelper.FindAll<GameObject>(includeInactive: true))
             {
                 if (go == null)
@@ -487,11 +526,13 @@ namespace UnitySkills
         }
 
         /// <summary>
-        /// Finds a GameObject using a flexible set of parameters, falling back step by step.
-        /// Priority order: entityId &gt; instanceId &gt; path &gt; name (exact) &gt; name (whole word, then contains) &gt; tag &gt; component type.
+        /// Finds a GameObject using a flexible set of parameters.
+        /// Priority order: entityId &gt; instanceId &gt; path &gt; name (exact) &gt; name (as a hierarchy path, only when it contains '/') &gt; name (whole word, then contains) &gt; tag &gt; component type.
+        /// An id decides alone: one that names no GameObject or component returns null instead of falling back to a lower
+        /// locator, which could land on a same-name object. A missed path still falls back to the name.
         /// Non-exact resolutions are recorded for <see cref="DrainResolutionNotes"/>.
         /// </summary>
-        /// <param name="name">Simple name (exact match first, falls back to whole-word, then contains match; when that fallback is ambiguous the first match is returned — <see cref="FindOrError"/> rejects it instead)</param>
+        /// <param name="name">Simple name (exact match first; a name containing '/' with no exact match is tried as a hierarchy path, e.g. "Root/Hall/Markers"; then falls back to whole-word, then contains match; when that fallback is ambiguous the first match is returned — <see cref="FindOrError"/> rejects it instead)</param>
         /// <param name="instanceId">Legacy Unity instance ID</param>
         /// <param name="path">Hierarchy path, e.g. "Parent/Child/Target"</param>
         /// <param name="tag">Look up by tag, e.g. "MainCamera", "Player"</param>
@@ -500,7 +541,7 @@ namespace UnitySkills
         /// <returns>The found GameObject, or null if not found</returns>
         public static GameObject Find(string name = null, int instanceId = 0, string path = null, string tag = null, string componentType = null, string entityId = null)
         {
-            var go = Resolve(name, instanceId, path, tag, componentType, entityId, out var ambiguousMatches);
+            var go = Resolve(name, instanceId, path, tag, componentType, entityId, out var ambiguousMatches, out _);
             // Find has no error channel, so an ambiguous word/substring match keeps its historical first-match
             // result; the note makes that choice visible instead of silent. FindOrError rejects it outright.
             if (ambiguousMatches != null)
@@ -509,33 +550,27 @@ namespace UnitySkills
         }
 
         /// <summary>
-        /// The shared lookup behind <see cref="Find"/> and <see cref="FindOrError"/>. When the name's word/substring
-        /// fallback matches several objects, <paramref name="ambiguousMatches"/> lists them and the first is returned.
+        /// The shared lookup behind <see cref="Find"/> and <see cref="FindOrError"/>. A name with no exact match that
+        /// contains '/' is resolved as a hierarchy path (<see cref="FindByPath"/>: inactive objects, a leading '/' and a
+        /// scene-name prefix are accepted) before the word/substring fallback runs, and the note says so. Ids never get here.
+        /// When the name's word/substring fallback matches several objects, <paramref name="ambiguousMatches"/> lists
+        /// them and the first is returned.
+        /// When a given id names no GameObject, null is returned and <paramref name="idMissError"/> is the error to report.
         /// </summary>
         private static GameObject Resolve(string name, int instanceId, string path, string tag, string componentType, string entityId,
-            out List<GameObject> ambiguousMatches)
+            out List<GameObject> ambiguousMatches, out object idMissError)
         {
             ambiguousMatches = null;
+            idMissError = null;
 
             // Priority 1: EntityId (most precise, and compatible with Unity 6000.5).
-            if (!string.IsNullOrWhiteSpace(entityId))
-            {
-                var obj = UnityObjectIdUtility.EntityIdToObject(entityId);
-                if (obj is GameObject go)
-                    return go;
-                if (obj is Component component)
-                    return component.gameObject;
-            }
+            if (UnityObjectIdUtility.IsGivenEntityId(entityId))
+                return ResolveId("entityId", entityId.Trim(), UnityObjectIdUtility.EntityIdToObject(entityId), name, path, out idMissError);
 
             // Priority 2: legacy instance ID.
             if (instanceId != 0)
-            {
-                var obj = UnityObjectIdUtility.ObjectIdToObject(instanceId);
-                if (obj is GameObject go)
-                    return go;
-                if (obj is Component component)
-                    return component.gameObject;
-            }
+                return ResolveId("instanceId", instanceId.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                    UnityObjectIdUtility.ObjectIdToObject(instanceId), name, path, out idMissError);
 
             // Priority 3: Hierarchy path (can locate nested objects).
             bool pathMissed = false;
@@ -550,10 +585,22 @@ namespace UnitySkills
                 pathMissed = true;
             }
 
-            // Priority 4: look up by simple name, exact match first, then whole-word, then substring.
+            // Priority 4: look up by simple name, exact match first, then a hierarchy path (only for a name containing '/'),
+            // then whole-word, then substring.
             if (!string.IsNullOrEmpty(name))
             {
                 var go = FindByExactName(name);
+                // Callers often pass "Root/Hall/Markers" as a name. Unity names may contain '/', so an exact match wins;
+                // trying the path before the fuzzy tiers keeps a substring hit from binding the wrong object.
+                if (go == null && name.IndexOf('/') >= 0)
+                {
+                    go = FindByPath(name);
+                    if (go != null)
+                    {
+                        AddResolutionNote($"name '{name}' has no exact match; resolved as a hierarchy path (path: {GetPath(go)})");
+                        NoteInexactPath(name, go);
+                    }
+                }
                 if (go == null)
                 {
                     var matches = FindByNameFallback(name, out var strategy);
@@ -598,6 +645,93 @@ namespace UnitySkills
             }
 
             return null;
+        }
+
+        /// <summary>
+        /// An id names its object or nothing. A miss becomes <paramref name="idMissError"/> and is never handed on to the
+        /// path or name, which could bind a same-name object; a name or path given alongside a hit is only noted.
+        /// </summary>
+        private static GameObject ResolveId(string kind, string id, UnityEngine.Object found, string name, string path, out object idMissError)
+        {
+            var go = found as GameObject ?? (found as Component)?.gameObject;
+            if (go == null)
+            {
+                idMissError = BuildIdMissError(kind, id, found);
+                return null;
+            }
+
+            idMissError = null;
+            var outranked = new List<string>();
+            if (!string.IsNullOrEmpty(name) && !string.Equals(name, go.name, System.StringComparison.OrdinalIgnoreCase))
+                outranked.Add($"name '{name}'");
+            if (!string.IsNullOrEmpty(path) && !PathNamesObject(path, go))
+                outranked.Add($"path '{path}'");
+            if (outranked.Count > 0)
+                AddResolutionNote($"{kind} {id} outranks {string.Join(" and ", outranked)}; used '{GetPath(go)}'");
+            if (!IsInOpenScene(go))
+                AddResolutionNote($"{kind} {id} names '{go.name}' outside the open scenes (Prefab Mode or a prefab asset)");
+            return go;
+        }
+
+        private static bool PathNamesObject(string path, GameObject go)
+        {
+            var key = NormalizePathKey(path);
+            var actual = GetPath(go);
+            var sceneName = go.scene.name;
+            return string.Equals(key, actual, System.StringComparison.OrdinalIgnoreCase) ||
+                (!string.IsNullOrEmpty(sceneName) && string.Equals(key, sceneName + "/" + actual, System.StringComparison.OrdinalIgnoreCase));
+        }
+
+        /// <summary>Whether the object lives in a loaded scene (or DontDestroyOnLoad), not in Prefab Mode or an asset.</summary>
+        private static bool IsInOpenScene(GameObject go)
+        {
+            var scene = go.scene;
+            if (!scene.IsValid())
+                return false;
+            if (scene.name == DontDestroyOnLoadSceneName)
+                return true;
+
+            for (int i = 0; i < SceneManager.sceneCount; i++)
+            {
+                if (SceneManager.GetSceneAt(i).handle == scene.handle)
+                    return true;
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// The answer for an id that names no GameObject or component. A stale id is the usual cause: ids last one editor
+        /// session, and a deleted, reloaded or re-created object gets a new one.
+        /// </summary>
+        private static object BuildIdMissError(string kind, string id, UnityEngine.Object found)
+        {
+            string error;
+            string reason;
+            if (found != null)
+            {
+                error = $"{kind} {id} names a {found.GetType().Name}, not a GameObject or a component";
+                reason = "Pass the id of a scene GameObject or of one of its components; gameobject_find and scene_get_hierarchy return them.";
+            }
+            else if (kind == "instanceId" && !UnityObjectIdUtility.HasLegacyInstanceIds)
+            {
+                error = $"GameObject not found: {kind} {id}";
+                reason = "This Unity version has no legacy instance ids (responses report instanceId 0): retry with the object's entityId, path or name.";
+            }
+            else
+            {
+                error = $"GameObject not found: {kind} {id}";
+                reason = $"The {kind} may be stale: ids last one editor session, and a deleted, reloaded or re-created object gets a new one. " +
+                         "Retry with the object's path or name, or look up its current entityId with gameobject_find.";
+            }
+
+            return new
+            {
+                error,
+                errorCode = SkillErrorCode.TargetNotFound.ToWireString(),
+                retryStrategy = SkillErrorResponse.RetryFindAndRetry,
+                relatedSkills = new[] { "gameobject_find", "scene_get_hierarchy" },
+                suggestedFixes = new[] { new { action = "find_target", skill = "gameobject_find", reason } }
+            };
         }
 
         /// <summary>
@@ -679,7 +813,8 @@ namespace UnitySkills
                 return null;
 
             var cache = GetOrBuildSceneCache();
-            if (cache.PathLookup.TryGetValue(normalizedPath, out var cachedGo))
+            if (cache.ExactPathLookup.TryGetValue(normalizedPath, out var cachedGo) ||
+                cache.PathLookup.TryGetValue(normalizedPath, out cachedGo))
                 return cachedGo;
 
             var parts = normalizedPath.Split(new[] { '/' }, System.StringSplitOptions.RemoveEmptyEntries);
@@ -699,8 +834,9 @@ namespace UnitySkills
                 if (partIndex >= parts.Length)
                     continue;
 
-                var current = rootObjects.FirstOrDefault(go =>
-                    go.name.Equals(parts[partIndex], System.StringComparison.OrdinalIgnoreCase));
+                var rootName = parts[partIndex];
+                var current = rootObjects.FirstOrDefault(go => go.name.Equals(rootName, System.StringComparison.Ordinal)) ??
+                    rootObjects.FirstOrDefault(go => go.name.Equals(rootName, System.StringComparison.OrdinalIgnoreCase));
                 if (current == null)
                     continue;
 
@@ -852,18 +988,22 @@ namespace UnitySkills
         /// <summary>
         /// Finds an object, returning an error with close-match suggestions when it can't be found, or with every
         /// candidate when a name has no exact match and its whole-word/substring fallback matches more than one object.
+        /// A name containing '/' with no exact match is first resolved as a hierarchy path, so "Root/Hall/Markers" passed as a name works.
+        /// An entityId or instanceId that names no GameObject is an error of its own (the id may be stale), never a
+        /// fallback to the path or name.
         /// </summary>
         public static (GameObject go, object error) FindOrError(string name = null, int instanceId = 0, string path = null, string tag = null, string componentType = null, string entityId = null)
         {
-            var go = Resolve(name, instanceId, path, tag, componentType, entityId, out var ambiguousMatches);
+            var go = Resolve(name, instanceId, path, tag, componentType, entityId, out var ambiguousMatches, out var idMissError);
+            if (idMissError != null)
+                return (null, idMissError);
             if (ambiguousMatches != null)
                 return (null, BuildAmbiguousNameError(name, ambiguousMatches));
 
             if (go == null)
             {
-                var identifier = !string.IsNullOrEmpty(entityId) ? $"entityId {entityId}" :
-                    instanceId != 0 ? $"instanceId {instanceId}" :
-                    !string.IsNullOrEmpty(path) ? $"path '{path}'" :
+                // A given id never gets here: it either resolved or produced idMissError above.
+                var identifier = !string.IsNullOrEmpty(path) ? $"path '{path}'" :
                     !string.IsNullOrEmpty(tag) ? $"tag '{tag}'" :
                     !string.IsNullOrEmpty(componentType) ? $"component '{componentType}'" :
                     $"name '{name}'";
@@ -1064,6 +1204,25 @@ namespace UnitySkills
             StringEscapeHandling = Newtonsoft.Json.StringEscapeHandling.Default,
             NullValueHandling = Newtonsoft.Json.NullValueHandling.Ignore
         };
+
+        /// <summary>
+        /// <c>JObject.Parse</c> that leaves every JSON string a string. The default reader turns an ISO-8601 string into a Date
+        /// token, and reading that token back as a string (<c>ToObject</c>, <c>ToString</c>) yields culture-formatted text
+        /// ("2026-11-06T06:07:50Z" becomes "11/06/2026 06:07:50"). Use it for any JSON that carries caller-supplied values.
+        /// </summary>
+        internal static Newtonsoft.Json.Linq.JObject ParseObjectKeepingStrings(string json)
+        {
+            using (var reader = new JsonTextReader(new StringReader(json)) { DateParseHandling = DateParseHandling.None })
+            {
+                var parsed = Newtonsoft.Json.Linq.JObject.Load(reader);
+                while (reader.Read())
+                {
+                    if (reader.TokenType != JsonToken.Comment)
+                        throw new JsonReaderException("Additional text found in JSON string after parsing content.");
+                }
+                return parsed;
+            }
+        }
 
         /// <summary>
         /// Gets all loaded types across every non-dynamic assembly.

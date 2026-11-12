@@ -15,11 +15,17 @@ namespace UnitySkills
         internal static Action<bool> SetPlayingForTests;
         internal static Func<string, string, string> ExecuteForTests;
         internal static Func<int> FrameForTests;
+        internal static readonly string[] FailureLogTypes = { "Error", "Exception", "Assert" };
+        // Entering Play Mode reloads the domain, which slows down over a long editor session; it has its own limit so the
+        // scenario's timeoutSeconds starts once Play Mode is running.
+        internal const int PlayEntryTimeoutSeconds = 300;
         internal static Func<JObject> LogWindowForTests;
         internal static Func<long> LogSeqForTests;
         internal static Func<bool> BackgroundForTests;
         internal static Action<bool> SetBackgroundForTests;
+        internal static Func<bool> CompileFailedForTests;
         private static bool Playing => PlayingForTests?.Invoke() ?? EditorApplication.isPlaying;
+        private static bool CompileFailed => CompileFailedForTests?.Invoke() ?? EditorUtility.scriptCompilationFailed;
         private static bool Background => BackgroundForTests?.Invoke() ?? Application.runInBackground;
         private static void SetPlaying(bool value) { if (SetPlayingForTests != null) SetPlayingForTests(value); else EditorApplication.isPlaying = value; }
         private static void SetBackground(bool value) { if (SetBackgroundForTests != null) SetBackgroundForTests(value); else Application.runInBackground = value; }
@@ -28,6 +34,8 @@ namespace UnitySkills
         private static bool Flag(BatchJobRecord job, string key) => ComponentInvocationService.Bool(job, key);
         private static long Number(BatchJobRecord job, string key) => ComponentInvocationService.Long(job, key);
         private static void Save(BatchJobRecord job) => ComponentInvocationService.Persist(job);
+        // For steps without side effects: a flush rewrites the whole job table, and a domain reload flushes first anyway.
+        private static void Track(BatchJobRecord job) => BatchPersistence.UpsertJob(job);
         private static bool Terminal(BatchJobRecord job) => job == null || job.status == "completed" || job.status == "failed" || job.status == "cancelled";
         private static JObject Error(string message) => (JObject)ComponentInvocationService.Error(message);
 
@@ -55,6 +63,8 @@ namespace UnitySkills
             if (timeoutSeconds < 1 || timeoutSeconds > 600) return Error("timeoutSeconds must be between 1 and 600.");
             if (executionMode == "edit" && Playing) return Error("An edit scenario requires Edit Mode.");
             if (ServerAvailabilityHelper.IsCompilationInProgress()) return Error("Wait for compilation and asset updating to finish.");
+            // Unity refuses Play Mode while scripts have compile errors; without this the job would wait out the entry limit.
+            if (executionMode == "play" && !Playing && CompileFailed) return Error("Scripts have compile errors, so Play Mode cannot start; fix them first (GET /compile/status lists them).");
             if (BatchPersistence.ListJobs(int.MaxValue).Any(j => j.kind == "run_scenario" && !Terminal(j))) return Error("Another scenario is active; wait or cancel it before starting another.");
             bool startedPlay = executionMode == "play" && !Playing;
             var caller = SkillsAuditLog.CaptureRequestContext();
@@ -62,7 +72,7 @@ namespace UnitySkills
                 new Dictionary<string, object> {
                     ["steps"] = parsed.ToString(Formatting.None), ["executionMode"] = executionMode,
                     ["startedPlayMode"] = startedPlay, ["originalRunInBackground"] = Background,
-                    ["deadlineTicks"] = DateTime.UtcNow.AddSeconds(timeoutSeconds).Ticks,
+                    ["timeoutSeconds"] = timeoutSeconds, ["deadlineTicks"] = DateTime.UtcNow.AddSeconds(startedPlay ? PlayEntryTimeoutSeconds : timeoutSeconds).Ticks,
                     ["scenarioStage"] = startedPlay ? "entering_play_mode" : "running", ["stepIndex"] = 0,
                     ["startedUtcTicks"] = DateTime.UtcNow.Ticks, ["startLogSeq"] = LogSeqForTests?.Invoke() ?? ConsoleLogHistoryService.GetCurrentSeq(),
                     ["callerActive"] = caller.Active, ["callerRemotePort"] = caller.RemotePort,
@@ -134,11 +144,17 @@ namespace UnitySkills
                 }
                 Complete(job); return;
             }
-            if (DateTime.UtcNow.Ticks > Number(job, "deadlineTicks")) { Finish(job, false, "Scenario timeout; steps will not be replayed.", "timeout"); return; }
+            if (DateTime.UtcNow.Ticks > Number(job, "deadlineTicks"))
+            {
+                if (stage == "entering_play_mode" && job.metadata.ContainsKey("timeoutSeconds")) Finish(job, false, $"Play Mode did not start within {PlayEntryTimeoutSeconds} s; steps will not be replayed.", "timeout");
+                else Finish(job, false, "Scenario timeout; steps will not be replayed.", "timeout");
+                return;
+            }
             if (stage == "entering_play_mode")
             {
                 if (!Playing) return;
                 job.metadata["scenarioStage"] = "running";
+                if (job.metadata.ContainsKey("timeoutSeconds")) job.metadata["deadlineTicks"] = DateTime.UtcNow.AddSeconds(Number(job, "timeoutSeconds")).Ticks;
                 job.status = "running";
                 Save(job); return;
             }
@@ -155,7 +171,7 @@ namespace UnitySkills
                 if (!Flag(job, "waiting"))
                 {
                     job.metadata["waiting"] = true; job.metadata["waitFrame"] = Frame;
-                    job.metadata["waitTicks"] = DateTime.UtcNow.Ticks; Save(job);
+                    job.metadata["waitTicks"] = DateTime.UtcNow.Ticks; Track(job);
                 }
                 bool done = kind == "wait_frames" ? Frame - Number(job, "waitFrame") >= step.Value<int>("frames") :
                     (DateTime.UtcNow.Ticks - Number(job, "waitTicks")) / (double)TimeSpan.TicksPerSecond >= step.Value<double>("seconds");
@@ -183,8 +199,8 @@ namespace UnitySkills
             {
                 string skillName = step.Value<string>("skill");
                 if (!SkillRouter.TryGetSkill(skillName, out var info) || (kind != "invoke" && !info.ReadOnly)) { Finish(job, false, "Step skill metadata changed; re-submit after inspection."); return; }
-                // Persist before dispatch so a reload inside arbitrary skill code cannot replay this step.
-                job.metadata["stepExecuting"] = true; Save(job);
+                // Persist before dispatch so a reload inside arbitrary skill code cannot replay this step. ReadOnly skills cannot reload.
+                if (kind == "invoke") { job.metadata["stepExecuting"] = true; Save(job); }
                 using (SkillsAuditLog.BeginRequestContext((int)Number(job, "callerRemotePort"),
                     job.metadata.TryGetValue("callerAgentId", out var callerId) ? Convert.ToString(callerId) : null, Flag(job, "callerExplicit")))
                     actual = JToken.Parse(Execute(skillName, (step["args"] ?? new JObject()).ToString(Formatting.None)));
@@ -202,7 +218,7 @@ namespace UnitySkills
                 if (!passed && kind == "wait_condition")
                 {
                     // Save the last observation for timeout evidence; polling remains subject to Router gates.
-                    job.resultData["lastConditionActual"] = selected ?? JValue.CreateNull(); Save(job); return;
+                    job.resultData["lastConditionActual"] = selected ?? JValue.CreateNull(); Track(job); return;
                 }
                 Record(job, step, selected, passed);
                 if (!passed) { Finish(job, false, "Assertion failed."); return; }
@@ -243,7 +259,8 @@ namespace UnitySkills
             job.resultData["lastActual"] = actual;
             job.metadata["stepIndex"] = Number(job, "stepIndex") + 1;
             job.metadata.Remove("childJobId"); job.metadata.Remove("waiting");
-            job.status = "running"; job.currentStage = "step_" + Number(job, "stepIndex"); Save(job);
+            job.status = "running"; job.currentStage = "step_" + Number(job, "stepIndex");
+            if (step.Value<string>("kind") == "invoke") Save(job); else Track(job);
         }
         private static void Finish(BatchJobRecord job, bool passed, string error, string failureStage = "failed")
         {
@@ -269,13 +286,22 @@ namespace UnitySkills
             bool passed = Convert.ToBoolean(job.resultData["passed"]);
             var compilation = JToken.Parse(CompilationResultService.GetLastCompilationJson() ?? "null");
             job.resultData["compilation"] = compilation;
-            var window = LogWindowForTests?.Invoke() ?? JObject.FromObject(ConsoleLogHistoryService.ReadWindow(Number(job, "startLogSeq")), JsonSerializer.Create(SkillsCommon.JsonSettings));
+            JObject window = LogWindowForTests?.Invoke(), failureWindow = window;
+            if (window == null)
+            {
+                long start = Number(job, "startLogSeq");
+                var all = ConsoleLogHistoryService.ReadWindow(start, stackTraceTypes: FailureLogTypes);
+                var serializer = JsonSerializer.Create(SkillsCommon.JsonSettings);
+                window = JObject.FromObject(all, serializer);
+                failureWindow = JObject.FromObject(ConsoleLogHistoryService.ReadWindow(start, all.snapshotSeq, types: FailureLogTypes), serializer);
+            }
             job.resultData["logWindow"] = window;
+            job.resultData["failureLogWindow"] = failureWindow;
             // Incomplete evidence is not a verified pass. Keep assertion evidence so callers can distinguish causes.
-            bool complete = (window.Value<bool?>("complete") ?? false) && !(window.Value<bool?>("hasMore") ?? false);
-            bool errors = window.Descendants().OfType<JProperty>().Any(p =>
+            bool complete = window.Value<bool?>("complete") ?? false;
+            bool errors = failureWindow.Descendants().OfType<JProperty>().Any(p =>
                 (p.Name == "type" || p.Name == "logType" || p.Name == "severity") &&
-                new[] { "Error", "Exception", "Assert" }.Contains(Convert.ToString(((JValue)p.Value).Value), StringComparer.OrdinalIgnoreCase));
+                FailureLogTypes.Contains(Convert.ToString(((JValue)p.Value).Value), StringComparer.OrdinalIgnoreCase));
             if (passed && (!complete || errors || ServerAvailabilityHelper.IsCompilationInProgress()))
             {
                 job.resultData["passed"] = false;

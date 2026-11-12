@@ -1,5 +1,8 @@
-﻿using Newtonsoft.Json.Linq;
+﻿using System.Linq;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 using NUnit.Framework;
+using UnityEngine;
 
 namespace UnitySkills.Tests.OptionalPackages
 {
@@ -116,6 +119,44 @@ namespace UnitySkills.Tests.OptionalPackages
             var result = Ok(Run("netcode_add_network_animator", new JObject { ["name"] = "R6NetAnim" }));
             Assert.That(result["success"]?.Value<bool>(), Is.True, result.ToString());
             Assert.That(ComponentNamed(Find("R6NetAnim"), "NetworkAnimator"), Is.Not.Null);
+        }
+
+        [Test]
+        public void AddNetworkObject_EntityId_ReachesTheSecondOfTwoSameNameObjects()
+        {
+            var first = new GameObject("R6NetTwin");
+            var second = new GameObject("R6NetTwin");
+            GameObjectFinder.InvalidateCache();
+
+            Ok(Run("netcode_add_network_object", new JObject { ["entityId"] = UnityObjectIdUtility.GetEntityId(second) }));
+
+            Assert.That(ComponentNamed(second, "NetworkObject"), Is.Not.Null);
+            Assert.That(ComponentNamed(first, "NetworkObject"), Is.Null);
+        }
+
+        [Test]
+        public void SetDebugSimulator_ReturnsStructuredErrorAndLeavesUnityTransportUntouched()
+        {
+            // UnityTransport.SetDebugSimulatorParameters is a silent no-op from NGO 2.2.0 (an Obsolete error in 3.x); the skill must say so instead of reporting success.
+            Ok(Run("netcode_create_manager", new JObject { ["name"] = "R6NetManager" }));
+            var transport = ComponentNamed(Find("R6NetManager"), "UnityTransport");
+            var fields = new[] { "PacketDelayMS", "PacketJitterMS", "PacketDropRate" };
+            var before = Member(transport, "DebugSimulator");
+            var valuesBefore = fields.Select(f => Member(before, f)).ToArray();
+
+            var result = Run("netcode_set_debug_simulator", new JObject
+            {
+                ["name"] = "R6NetManager", ["packetDelay"] = 120, ["packetJitter"] = 15, ["dropRate"] = 7,
+            });
+
+            AssertError(result);
+            var text = result.ToString(Formatting.None);
+            Assert.That(result["errorCode"]?.ToString(), Is.EqualTo("SKILL_ERROR"), text);
+            Assert.That(text, Does.Contain("com.unity.multiplayer.tools"), text);
+            Assert.That(result["suggestedFixes"], Is.Not.Null, text);
+
+            var after = Member(transport, "DebugSimulator");
+            Assert.That(fields.Select(f => Member(after, f)).ToArray(), Is.EqualTo(valuesBefore), text);
         }
     }
 }

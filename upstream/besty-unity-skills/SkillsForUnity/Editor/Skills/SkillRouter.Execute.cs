@@ -32,6 +32,8 @@ namespace UnitySkills
         /// </summary>
         internal static string Execute(string name, string json, bool captureDiff, DryRunGateContext dryRunGate)
         {
+            // Cleared before any return, so an early one (SKILL_NOT_FOUND) never hands the previous call's time to telemetry.
+            _lastWorkflowEndMs = null;
             Initialize();
             if (!_skills.TryGetValue(name, out var skill))
             {
@@ -41,9 +43,6 @@ namespace UnitySkills
                 return ApplySurfaceGate(skill, name);
 
             bool autoStartedWorkflow = false;
-            // The persistence cost of EndTask() on the auto-workflow path, attached to the success envelope as workflowEndMs.
-            // Always null on every other path, to keep output byte-for-byte unchanged.
-            long? workflowEndMs = null;
             var wrapWithUndoTransaction = !skill.ReadOnly && !_transactionlessSkills.Contains(name);
             int undoGroup = -1;
             int workflowSnapshotCountBefore = WorkflowManager.CurrentTask?.snapshots?.Count ?? 0;
@@ -197,7 +196,7 @@ namespace UnitySkills
                 if (skill.TracksWorkflow && !WorkflowManager.IsRecording)
                 {
                     var desc = $"{name} - {(json?.Length > 80 ? json.Substring(0, 80) + "..." : json ?? "")}";
-                    WorkflowManager.BeginTask(name, desc);
+                    WorkflowManager.BeginAutoTask(name, desc, DescribeWorkflowTarget(args));
                     autoStartedWorkflow = true;
                 }
 
@@ -330,32 +329,36 @@ namespace UnitySkills
                         ? SkillErrorClassifier.ForCode(errorContext.Code.Value, errorContext.Message)
                         : SkillErrorClassifier.Classify(errorContext.Message);
 
+                    var finalCode = errorContext.Code ?? classified.Code;
+                    // TARGET_NOT_FOUND names the answering editor, so a call that reached the wrong one of several running editors is visible.
+                    var extra = finalCode == SkillErrorCode.TargetNotFound
+                        ? SkillErrorResponse.WithTargetNotFoundInstance(finalCode, errorContext.Extra, SkillErrorResponse.CurrentInstanceLabel())
+                        : errorContext.Extra;
+
                     return SkillErrorResponse.Build(
-                        errorContext.Code ?? classified.Code,
+                        finalCode,
                         errorContext.Message,
                         skill: name,
                         suggestedFixes: errorContext.SuggestedFixes ?? classified.SuggestedFixes,
                         relatedSkills: errorContext.RelatedSkills ?? classified.RelatedSkills,
                         retryStrategy: errorContext.RetryStrategy ?? classified.RetryStrategy,
-                        extra: WithResolutionNotes(errorContext.Extra, resolutionNotes));
+                        extra: WithResolutionNotes(extra, resolutionNotes));
                 }
 
+                // The label waits for the task this call records. Only a call that got here succeeded: a failed one returned above.
+                if (skill.TracksWorkflow && TryReadCheckpointLabel(args, out var checkpointLabel))
+                    WorkflowManager.SetPendingCheckpointLabel(checkpointLabel);
+
                 // ========== Automatic workflow wrap-up ==========
+                // A manual task or session records nothing here: its task reaches the log when it ends.
                 if (autoStartedWorkflow)
                 {
-                    // On the auto-workflow path, persistence is entirely EndTask's responsibility (it calls SaveHistory internally).
-                    // The cost is measured here for observability.
+                    // On the auto-workflow path, persistence is entirely EndTask's responsibility (it appends the task's record).
+                    // The cost is measured here and reaches the telemetry row through ConsumeLastWorkflowEndMs.
                     var sw = System.Diagnostics.Stopwatch.StartNew();
                     WorkflowManager.EndTask();
                     sw.Stop();
-                    workflowEndMs = sw.ElapsedMilliseconds;
-                }
-                else if (WorkflowManager.IsRecording)
-                {
-                    // Manual session (workflow_begin_task): otherwise every tracked skill would save on every single call.
-                    // Skips the save when the current task has had no new snapshots since the last save.
-                    if (ManualSessionIsDirty(WorkflowManager.CurrentTask))
-                        WorkflowManager.SaveHistory();
+                    _lastWorkflowEndMs = sw.ElapsedMilliseconds;
                 }
                 // ========================================
 
@@ -375,16 +378,24 @@ namespace UnitySkills
                 // the diff can never break the response, and a skill that reported an error above never reaches this point anyway.
                 JToken sceneDiff = BuildSceneDiff(captureDiff, skill, diffCapture, result);
 
-                if (!verbose && result != null)
+                // Explicit paging keys page the response whatever verbose says; verbose only governs the automatic truncation.
+                bool explicitPaging = offset.HasValue || limit.HasValue;
+                if ((!verbose || explicitPaging) && result != null)
                 {
                     // "Summary Mode" logic with pagination
                     var jsonResult = JToken.FromObject(result);
 
-                    var arr = FindPageArray(jsonResult, out var arrayProperty);
+                    var arr = FindPageArray(jsonResult, skill, explicitPaging, out var arrayProperty);
+                    if (arr == null && explicitPaging && jsonResult is JObject unpageable)
+                    {
+                        // Returning everything without a word would read as the page that was asked for.
+                        unpageable["pagingIgnored"] = DescribeUnpageableResult(unpageable, skill);
+                        return SerializeSuccessResponse(unpageable, sceneDiff, resolutionNotes);
+                    }
                     // Read once: a single main-thread EditorPrefs-backed property access, reused below as both the
                     // auto-truncation trigger and the default page size, so the two can never disagree with each other.
                     int summaryPageSize = SummaryPageSize;
-                    if (arr != null && ((SummaryAutoTruncate && arr.Count > summaryPageSize) || offset.HasValue || limit.HasValue))
+                    if (arr != null && ((SummaryAutoTruncate && arr.Count > summaryPageSize) || explicitPaging))
                     {
                         int startIndex = offset ?? 0;
                         int pageSize = limit ?? summaryPageSize;
@@ -409,9 +420,9 @@ namespace UnitySkills
                                 preserved[arrayProperty] = new JArray();
                                 foreach (var property in emptyWrapper.Properties().Where(property => property.Name != "items"))
                                     preserved[property.Name] = property.Value;
-                                return SerializeSuccessResponse(preserved, sceneDiff, workflowEndMs, resolutionNotes);
+                                return SerializeSuccessResponse(preserved, sceneDiff, resolutionNotes);
                             }
-                            return SerializeSuccessResponse(emptyWrapper, sceneDiff, workflowEndMs, resolutionNotes);
+                            return SerializeSuccessResponse(emptyWrapper, sceneDiff, resolutionNotes);
                         }
 
                         int endIndex = (int)Math.Min((long)startIndex + pageSize, arr.Count);
@@ -437,8 +448,10 @@ namespace UnitySkills
 
                         if (hasMore)
                         {
+                            // With paging keys sent, verbose=true alone returns this same page again.
+                            var allItems = explicitPaging ? "drop the paging keys and pass 'verbose=true'" : "'verbose=true'";
                             wrapper["nextOffset"] = nextOffset;
-                            wrapper["hint"] = $"Showing items {startIndex}-{endIndex - 1} of {arr.Count}. To see more, pass 'pageOffset={nextOffset}' (or 'verbose=true' for all items).";
+                            wrapper["hint"] = $"Showing items {startIndex}-{endIndex - 1} of {arr.Count}. To see more, pass 'pageOffset={nextOffset}' (or {allItems} for all items).";
                         }
                         else
                         {
@@ -451,15 +464,15 @@ namespace UnitySkills
                             preserved[arrayProperty] = paginatedItems;
                             foreach (var property in wrapper.Properties().Where(property => property.Name != "items"))
                                 preserved[property.Name] = property.Value;
-                            return SerializeSuccessResponse(preserved, sceneDiff, workflowEndMs, resolutionNotes);
+                            return SerializeSuccessResponse(preserved, sceneDiff, resolutionNotes);
                         }
 
-                        return SerializeSuccessResponse(wrapper, sceneDiff, workflowEndMs, resolutionNotes);
+                        return SerializeSuccessResponse(wrapper, sceneDiff, resolutionNotes);
                     }
                 }
 
-                // Full mode (verbose=true, or the result is already small): return as-is
-                return SerializeSuccessResponse(result, sceneDiff, workflowEndMs, resolutionNotes);
+                // Full mode (verbose=true without paging keys, or the result is already small): return as-is
+                return SerializeSuccessResponse(result, sceneDiff, resolutionNotes);
             }
             catch (TargetInvocationException ex)
             {
@@ -523,7 +536,19 @@ namespace UnitySkills
                 // Whatever is left was recorded after the response was decided (entityId enrichment); never carry it over.
                 GameObjectFinder.DrainResolutionNotes();
                 EditorChangeTrackerService.EndRestExecution();
+                WorkflowManager.NoteAgentCall();
             }
+        }
+
+        /// <summary>
+        /// The auto-workflow EndTask cost of the Execute that just returned on this thread, or null when it recorded no task;
+        /// cleared by the read so a later call that records nothing never reports a stale value.
+        /// </summary>
+        internal static long? ConsumeLastWorkflowEndMs()
+        {
+            var value = _lastWorkflowEndMs;
+            _lastWorkflowEndMs = null;
+            return value;
         }
 
         public static string DryRun(string name, string json) => DryRun(name, json, WireV1);
@@ -551,7 +576,7 @@ namespace UnitySkills
                 var validation = ValidateParameters(skill, json);
                 var planData = SkillPlanningService.BuildPlanData(skill, validation);
                 // Inside a /skills/batch dry run, what this step would create becomes nameable by the steps after it.
-                SkillPlanningService.RegisterPendingCreates(validation, planData);
+                SkillPlanningService.RegisterPendingCreates(skill, validation, planData);
                 var resolutionNotes = MergeResolutionNotes(null);
                 var dryRunToken = issuePolicyToken && validation.Valid && DryRunGateApplies(skill)
                     ? DryRunPolicyService.IssueToken(skill.Name, DryRunPolicyService.HashSkillArgs(skill, json))
@@ -601,7 +626,7 @@ namespace UnitySkills
                         authorization = BuildAuthorizationPreview(skill),
                         steps = planData?["steps"],
                         changes = planData?["changes"],
-                        note = "No execution performed"
+                        note = DryRunV2Note(validation.Valid && planData == null)
                     }, resolutionNotes, dryRunToken);
                 }
                 return SerializeWithResolutionNotes(new
@@ -675,6 +700,15 @@ namespace UnitySkills
             }
         }
 
+        /// <summary>
+        /// The v2 dryRun note says what valid:true covers. A valid preview without planner output checked parameters only,
+        /// so it must not read as "the target exists". An invalid one keeps the short note; its errors say the rest
+        /// (a planner that rejects a missing target also returns no output).
+        /// </summary>
+        private static string DryRunV2Note(bool validWithoutPlan) => validWithoutPlan
+            ? "No execution performed. valid:true = no validation errors; warnings never block; this skill has no planner, so the target was not looked up."
+            : "No execution performed. valid:true = no validation errors; warnings never block.";
+
         // ========== Correction report and resolution notes ==========
 
         internal const string ResolutionNotesKey = "resolutionNotes";
@@ -690,7 +724,7 @@ namespace UnitySkills
                 GameObjectFinder.DrainResolutionNotes();
                 var validation = ValidateParameters(skill, json);
                 var plan = SkillPlanningService.BuildPlan(skill, validation);
-                SkillPlanningService.RegisterPendingCreates(validation, plan);
+                SkillPlanningService.RegisterPendingCreates(skill, validation, plan);
                 var resolutionNotes = MergeResolutionNotes(null);
 
                 // A plan made for a skill the profile hides is a plan that can never execute, and ?mode=plan used to be the one preview

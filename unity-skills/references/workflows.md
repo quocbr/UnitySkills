@@ -8,6 +8,8 @@ First identify the requested outcome and the project's Unity version, resolved p
 
 For code using `UniTask`, check the resolved `com.cysharp.unitask` version and load [UniTask design](../skills/unitask-design/GUIDE.md) for cancellation, PlayerLoop timing, composition, and conversion rules. Use [async strategy](../skills/async/GUIDE.md) when choosing between UniTask, Unity `Awaitable`, coroutines, and `Task`; do not add a package solely because a guide describes it.
 
+For C# using packages such as Netcode for GameObjects, Addressables, or YooAsset, check the resolved package version and read its matching design guide in the [module catalog](../skills/GUIDE.md) before editing.
+
 | Request | Route and expected result |
 | --- | --- |
 | **Write a script or feature** | Define the behavior, owner, data lifetime, and integration points. Use [script design](../skills/scriptdesign/GUIDE.md) for class and field responsibilities, [architecture](../skills/architecture/GUIDE.md) when several systems change, and [Inspector design](../skills/inspector/GUIDE.md) for authored fields. Implement the smallest coherent change and check its callers and serialized bindings. |
@@ -43,11 +45,13 @@ Use [UI patterns](nice-wolf-studio/unity-ui-patterns/GUIDE.md) for screen flow, 
 - **UI Toolkit** (`.uxml`, `.uss`, `UIDocument`, `CreateGUI`). Use the [authoring guide](unity-technologies/ui-uitk/GUIDE.md) for layout, controls and runtime bindings. In an open Editor, use [the UI Toolkit operations](../skills/uitoolkit/GUIDE.md) to inspect existing files and documents, then create or update only the needed UXML, USS, `PanelSettings` or document. Verify the assigned visual tree and panel settings and, for runtime UI, verify its binding in the actual panel.
 - **uGUI** (`Canvas`, `RectTransform`, prefab UI). Use the [uGUI guide](unity-technologies/ui-ugui/GUIDE.md) to design hierarchy, anchors and layout. Use [the uGUI operations](../skills/ui/GUIDE.md) to inspect and edit scene controls. Use [prefab operations](../skills/prefab/GUIDE.md) when the target is a prefab asset. Verify anchors and parent layout at the target aspect ratios.
 - **IMGUI** (`OnGUI`, `OnInspectorGUI`). Follow [the IMGUI guide](unity-technologies/ui-imgui/GUIDE.md) for editor C# code. If updating via the running Editor, use [the script operations](../skills/script/GUIDE.md) and check compilation. uGUI operations apply to Canvas objects and UI Toolkit operations apply to UXML, USS and visual elements.
-- For multilingual text or font issues, use [Localization](unity-technologies/localization/GUIDE.md) or [TextMeshPro optimization](unity-technologies/optimize-text-mesh-pro/GUIDE.md) with the applicable UI framework above.
+- For multilingual text or font issues, use [Localization](unity-technologies/localize-unity-project/GUIDE.md) or [TextMeshPro optimization](unity-technologies/optimize-text-mesh-pro/GUIDE.md) with the applicable UI framework above.
 
 ## CLI, Pipeline, tests and builds
 
 Use [the official Unity CLI guide](unity-technologies/unity-cli/GUIDE.md) for Editor and license management, independent CLI tasks, and CI. Check the installed binary's `--version` and relevant `--help` before selecting arguments. Use [the Pipeline guide](unity-technologies/unity-pipeline/GUIDE.md) when the task requires Pipeline commands or a connected Player and the matching package is available.
+
+For Unity Build Automation, use [Cloud Build](unity-technologies/manage-cloud-build/GUIDE.md) to configure build targets or diagnose failed cloud jobs. Confirm the Unity Cloud project and build target before issuing commands against them.
 
 Use [test patterns](nice-wolf-studio/unity-testing/GUIDE.md) to choose Edit Mode or Play Mode and make the regression observable. Use [platform builds](nice-wolf-studio/unity-platforms/GUIDE.md) for Build Profiles, platform defines, mobile targets and IL2CPP. When an installed CLI command behaves differently from its reference, consult the [CLI contract](nice-wolf-studio/unity-cli-contract/GUIDE.md) and [surface preflight](nice-wolf-studio/unity-surface-preflight/GUIDE.md) for diagnostic ideas. Use the Workbench's own CLI and Editor protocol above for execution, dependency setup, and permission decisions. Treat the upstream CLI examples as versioned observations.
 
@@ -64,10 +68,16 @@ Use [package and services examples](nice-wolf-studio/unity-packages-services/GUI
 
 Choose the headless or live write path according to the Editor state, available tools and permissions. For an open Editor use the supported Besty operation only when allowed by its schema and mode. Wait for any reload and verify both the resolved version and project manifest or lockfile. A blocked REST mutation is handled through its policy flow.
 
+## Workflow history and evaluation
+
+For an explicit request to undo a tracked Editor operation, use [Workflow history](../skills/workflow/GUIDE.md) to identify the checkpoint or step, preview the restore, and resolve any reported conflicts before applying it under the Editor protocol.
+
+For an explicit request to run the bundled UnitySkills benchmark, use the [evaluation guide](../skills/evaluation/GUIDE.md). For tests of the user's Unity project, use [CLI, Pipeline, tests and builds](#cli-pipeline-tests-and-builds).
+
 ## Navigation and physics
 
 - **NavMesh.** Follow [AI Navigation](unity-technologies/initialize-ai-navigation/GUIDE.md) to choose surfaces, agents, links, and the right package. Check whether `com.unity.ai.navigation` is installed before using `NavMeshSurface` or `NavMeshLink`. For a running Editor, use [NavMesh operations](../skills/navmesh/GUIDE.md) for supported bake, agent, obstacle or path work. Verify the agent can query a route on the intended surface with the correct agent type and area mask. Author missing surface/link features with the version-appropriate Unity API.
-- **3D collisions and queries.** Use [the PhysX diagnosis guide](unity-technologies/physics-3d-collision/GUIDE.md) to check layers, colliders, Rigidbody and callback setup. Use [physics operations](../skills/physics/GUIDE.md) and [component inspection](../skills/component/GUIDE.md) to check the live scene and run targeted 3D queries. A raycast confirms query behavior. Runtime collision callbacks must be verified in Play Mode when authorized.
+- **3D collisions and queries.** On Unity 6000.3 or later, use [the PhysX diagnosis guide](unity-technologies/fix-3d-physics-collisions/GUIDE.md) to check layers, colliders, Rigidbody and callback setup. For earlier versions, use [physics query correctness](nice-wolf-studio/unity-physics-queries/GUIDE.md) alongside the installed Editor's API. Use [physics operations](../skills/physics/GUIDE.md) and [component inspection](../skills/component/GUIDE.md) to check the live scene and run targeted 3D queries. Verify runtime collision callbacks in Play Mode when authorized.
 - **2D physics.** Select the appropriate system with [2D physics](unity-technologies/create-2d-physics/GUIDE.md). Use component inspection where supported and the chosen system's own API for 2D physics queries and callbacks.
 - Use [physics examples](nice-wolf-studio/unity-physics/GUIDE.md) and [physics query correctness](nice-wolf-studio/unity-physics-queries/GUIDE.md) for movement, query type, hit order, masks and triggers. Use [navigation and inference](nice-wolf-studio/unity-ai-navigation/GUIDE.md) for runtime NavMesh logic and Sentis inference with the corresponding package.
 

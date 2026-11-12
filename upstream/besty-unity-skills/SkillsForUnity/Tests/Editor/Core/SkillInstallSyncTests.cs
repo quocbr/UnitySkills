@@ -268,20 +268,13 @@ namespace UnitySkills.Tests.Core
             Assert.That(SkillInstaller.ReadInstalledVersion(null), Is.Null);
         }
 
-        [Test]
-        public void PreviousWorkbenchVersion_OnlyMigratesUnifiedWorkbenchCopies()
+        [TestCase("0.0.1")]
+        [TestCase("2.9.1")]
+        public void PreviousWorkbenchVersions_AreOlderThanCurrentPackage(string version)
         {
             var path = Path.Combine(_tempRoot, "previous-workbench");
-            Directory.CreateDirectory(Path.Combine(path, "references"));
-            Assert.That(SkillInstaller.CompareInstalledCopy("2.9.1", path),
-                Is.EqualTo(SkillInstaller.InstalledVersionState.Newer));
-
-            File.WriteAllText(Path.Combine(path, "EDITOR.md"), "Workbench protocol");
-            File.WriteAllText(Path.Combine(path, "references", "workflows.md"), "Workbench catalog");
-            Assert.That(SkillInstaller.CompareInstalledCopy("2.9.1", path),
+            Assert.That(SkillInstaller.CompareInstalledCopy(version, path),
                 Is.EqualTo(SkillInstaller.InstalledVersionState.Older));
-            Assert.That(SkillInstaller.CompareInstalledCopy("0.0.2", path),
-                Is.EqualTo(SkillInstaller.InstalledVersionState.Newer));
         }
 
         [Test]
@@ -413,6 +406,32 @@ namespace UnitySkills.Tests.Core
             Assert.That(report.Failed, Is.Empty);
             Assert.That(report.Updated, Is.EqualTo(new[] { "Installed Tool" }));
             Assert.That(File.ReadAllText(skillMd), Does.Not.Contain("stale copy"));
+        }
+
+        [Test]
+        public void SyncTargets_RefreshesEvalSkillBesideUnitySkills()
+        {
+            var target = Path.Combine(_tempRoot, "skills", SkillInstaller.SkillFolderName);
+            var seed = SkillInstaller.InstallSkill(target, "Test", "TestAgent");
+            Assert.That(seed.success, Is.True, "Test fixture could not seed an install: " + seed.message);
+
+            var evalSkillMd = Path.Combine(_tempRoot, "skills", SkillInstaller.EvalSkillFolderName, "SKILL.md");
+            File.WriteAllText(evalSkillMd, "stale evaluation copy from an older package version");
+
+            var report = SkillInstallSyncService.SyncTargets(new[]
+            {
+                new SkillInstaller.InstallTarget
+                {
+                    DisplayName = "Installed Tool",
+                    Path = target,
+                    IsInstalled = () => File.Exists(Path.Combine(target, "SKILL.md")),
+                    Install = () => SkillInstaller.InstallSkill(target, "Test", "TestAgent")
+                }
+            });
+
+            Assert.That(report.Failed, Is.Empty);
+            Assert.That(report.Updated, Is.EqualTo(new[] { "Installed Tool" }));
+            Assert.That(File.ReadAllText(evalSkillMd), Does.Not.Contain("stale evaluation copy"));
         }
 
         [Test]

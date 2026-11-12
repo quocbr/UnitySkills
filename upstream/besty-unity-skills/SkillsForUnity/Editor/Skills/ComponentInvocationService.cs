@@ -16,7 +16,7 @@ namespace UnitySkills
     {
         internal sealed class Request
         {
-            public string name, path, componentType, assembly, methodName, parameterTypes, genericTypeArguments, arguments;
+            public string name, path, entityId, componentType, assembly, methodName, parameterTypes, genericTypeArguments, arguments;
             public int instanceId, componentIndex;
             public bool isStatic;
             public string executionMode = "play";
@@ -60,7 +60,11 @@ namespace UnitySkills
             details: exception is AmbiguousCallException ambiguous ? new JObject { ["candidates"] = ambiguous.Candidates } : null,
             retryStrategy: SkillErrorResponse.Abort));
 
-        internal static Type ResolveType(string name)
+        internal static Type ResolveType(string name) => ResolveType(name, null);
+
+        /// <param name="prefer">When several types match, keep the ones this accepts if there are any: an instance call
+        /// passes "is a Component", so <c>Button</c> names UnityEngine.UI.Button, not UnityEngine.UIElements.Button.</param>
+        internal static Type ResolveType(string name, Func<Type, bool> prefer)
         {
             if (string.IsNullOrWhiteSpace(name)) throw new ArgumentException("componentType/type name is required.");
             var exact = Type.GetType(name, false);
@@ -82,6 +86,8 @@ namespace UnitySkills
                 }
             types = types.Distinct().ToList();
             if (types.Count == 0) throw new ArgumentException("Type not found: " + name);
+            if (types.Count > 1 && prefer != null && types.Any(prefer))
+                types = types.Where(prefer).ToList();
             if (types.Count > 1) throw new AmbiguousCallException("Ambiguous type; use an assembly-qualified name: " + name,
                 new JArray(types.Take(50).Select(t => new JObject { ["type"] = TypeName(t), ["assembly"] = t.Assembly.GetName().Name })));
             return types[0];
@@ -120,7 +126,8 @@ namespace UnitySkills
 
         internal static BoundCall Bind(Request request)
         {
-            var type = ResolveType(string.IsNullOrWhiteSpace(request.assembly) ? request.componentType : request.componentType + ", " + request.assembly);
+            Func<Type, bool> prefer = request.isStatic ? null : (Func<Type, bool>)(t => typeof(Component).IsAssignableFrom(t));
+            var type = ResolveType(string.IsNullOrWhiteSpace(request.assembly) ? request.componentType : request.componentType + ", " + request.assembly, prefer);
             if (string.IsNullOrWhiteSpace(request.methodName)) throw new ArgumentException("methodName is required.");
             var generics = ParseTypes(request.genericTypeArguments);
             var requestedTypes = request.parameterTypes == null ? null : ParseTypes(request.parameterTypes);
@@ -151,7 +158,7 @@ namespace UnitySkills
             if (!request.isStatic)
             {
                 if (!typeof(Component).IsAssignableFrom(type)) throw new ArgumentException("Instance methods require a Unity Component; ordinary C# types support static calls.");
-                var (go, error) = GameObjectFinder.FindOrError(request.name, request.instanceId, request.path);
+                var (go, error) = GameObjectFinder.FindOrError(request.name, request.instanceId, request.path, entityId: request.entityId);
                 if (error != null) throw new ArgumentException("Target GameObject could not be uniquely resolved.");
                 var components = go.GetComponents(type);
                 if (request.componentIndex < 0 || request.componentIndex >= components.Length) throw new ArgumentException("componentIndex is out of range.");
@@ -202,9 +209,20 @@ namespace UnitySkills
             if (nullable != null) return ConvertArgument(value, nullable);
             if (typeof(UnityEngine.Object).IsAssignableFrom(type))
             {
-                if (!(value is JObject reference)) throw new ArgumentException("Object arguments require an assetPath or referenceName/referencePath/referenceInstanceId object.");
+                if (!(value is JObject reference)) throw new ArgumentException("Object arguments require an assetPath or referenceName/referencePath/referenceInstanceId/referenceEntityId object.");
                 UnityEngine.Object resolved;
+                var referenceEntityId = reference.Value<string>("referenceEntityId");
                 if (reference.Value<string>("assetPath") is string assetPath) resolved = AssetDatabase.LoadAssetAtPath(assetPath, type);
+                else if (UnityObjectIdUtility.IsGivenEntityId(referenceEntityId))
+                {
+                    // The id decides alone, and may name the exact component (or an asset) the parameter takes.
+                    var named = UnityObjectIdUtility.EntityIdToObject(referenceEntityId);
+                    if (named == null) throw new ArgumentException("Object argument referenceEntityId " + referenceEntityId.Trim() + " names no object; it may be stale.");
+                    resolved = type.IsInstanceOfType(named) ? named
+                        : named is GameObject namedObject && typeof(Component).IsAssignableFrom(type) ? namedObject.GetComponent(type)
+                        : named is Component namedComponent && type == typeof(GameObject) ? namedComponent.gameObject
+                        : named;
+                }
                 else
                 {
                     var (go, error) = GameObjectFinder.FindOrError(reference.Value<string>("referenceName"), reference.Value<int?>("referenceInstanceId") ?? 0, reference.Value<string>("referencePath"));
@@ -437,7 +455,7 @@ namespace UnitySkills
         internal static void CaptureEvidence(BatchJobRecord job)
         {
             long finishSeq = ConsoleLogHistoryService.GetCurrentSeq();
-            var window = ConsoleLogHistoryService.ReadWindow(Long(job, "acceptedLogSeq"), finishSeq);
+            var window = ConsoleLogHistoryService.ReadWindow(Long(job, "acceptedLogSeq"), finishSeq, stackTraceTypes: RuntimeScenarioService.FailureLogTypes);
             finishSeq = window.snapshotSeq;
             bool started = Bool(job, "invocationStarted");
             job.resultData["acceptedUtc"] = Utc(job, "acceptedUtcTicks");

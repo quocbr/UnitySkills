@@ -1,7 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
 using UnityEditor;
@@ -10,26 +9,34 @@ using UnityEngine;
 namespace UnitySkills
 {
     /// <summary>
-    /// Content-addressed file store for workflow snapshots.
-    /// Each file blob is stored under its own SHA1 hash as the name; identical content is automatically deduplicated.
+    /// Content-addressed blob store of the workflow history (<see cref="WorkflowStore"/>): snapshot payloads and asset
+    /// bytes, each stored under its own SHA1 hash as the name, so identical content is stored once.
     /// </summary>
     internal static class WorkflowFileStore
     {
-        /// <summary>
-        /// Root directory for all workflow file blobs.
-        /// </summary>
-        internal static string OverrideStoreRootForTests;
-        public static string StoreRoot => OverrideStoreRootForTests ??
-            Path.GetFullPath(Path.Combine(Application.dataPath, "../Library/UnitySkills/workflow_files"));
+        /// <summary>Directory holding every blob: workflow/blobs.</summary>
+        public static string StoreRoot => WorkflowStore.BlobsRoot;
 
         /// <summary>
         /// Blobs stored within this time window are never reclaimed as "unreferenced":
         /// the caller may still be assembling the snapshot that will reference them.
         /// </summary>
-        private static readonly TimeSpan RecentWriteGrace = TimeSpan.FromMinutes(10);
+        internal static readonly TimeSpan RecentWriteGrace = TimeSpan.FromMinutes(10);
+
+        // Bytes of blobs written since the last TakeNewBlobBytes; the store measures itself once they add up.
+        private static long _newBlobBytes;
 
         /// <summary>Extension used for blobs whose content no longer matches their own hash.</summary>
         private const string CorruptSuffix = ".corrupt";
+
+        // Content hash of a source asset by (path, length, last write time), so snapshotting the same unchanged texture again
+        // costs one stat instead of a full read. A file written within the last RacyWindow is never cached: a second write
+        // inside the timestamp's resolution could keep both length and time.
+        private static readonly TimeSpan RacyWindow = TimeSpan.FromSeconds(2);
+        private const int MaxFileHashCacheEntries = 1024;
+        private static readonly Dictionary<string, (long length, DateTime lastWriteUtc, string hash)> _fileHashCache =
+            new Dictionary<string, (long, DateTime, string)>(StringComparer.Ordinal);
+        internal static int FileHashComputationsForTests;
 
         /// <summary>
         /// Stores an asset file in the content-addressed store, optionally deleting the source file.
@@ -55,7 +62,7 @@ namespace UnitySkills
             if (!File.Exists(fullPath))
                 return null;
 
-            string hash = ComputeFileHash(fullPath);
+            string hash = ComputeSourceFileHash(fullPath);
             if (string.IsNullOrEmpty(hash))
                 return null;
 
@@ -68,7 +75,7 @@ namespace UnitySkills
 
                 if (File.Exists(metaSourcePath))
                 {
-                    metaHash = ComputeFileHash(metaSourcePath);
+                    metaHash = ComputeSourceFileHash(metaSourcePath);
                     if (string.IsNullOrEmpty(metaHash) || !StoreBlob(metaSourcePath, metaHash))
                         return null;
                 }
@@ -76,6 +83,7 @@ namespace UnitySkills
                 // Only delete the source file after all required blobs have been persisted.
                 if (move)
                 {
+                    ForgetSourceFileHash(fullPath);
                     SafeDelete(fullPath);
                     if (File.Exists(metaSourcePath))
                         SafeDelete(metaSourcePath);
@@ -108,9 +116,7 @@ namespace UnitySkills
                 return false;
 
             string hashPath = GetHashPath(hash);
-            string metaHashPath = !string.IsNullOrEmpty(metaHash)
-                ? GetHashPath(metaHash)
-                : GetLegacyMetaHashPath(hash);
+            string metaHashPath = string.IsNullOrEmpty(metaHash) ? null : GetHashPath(metaHash);
 
             if (!File.Exists(hashPath))
                 return false;
@@ -118,12 +124,13 @@ namespace UnitySkills
             // Verify before writing anything, so a corrupted blob never touches the project.
             if (!VerifyBlobIntegrity(hash))
                 return false;
-            if (!string.IsNullOrEmpty(metaHash) && File.Exists(metaHashPath) && !VerifyBlobIntegrity(metaHash))
+            if (metaHashPath != null && File.Exists(metaHashPath) && !VerifyBlobIntegrity(metaHash))
                 return false;
 
             try
             {
                 EnsureDirectoryExists(fullPath);
+                ForgetSourceFileHash(fullPath);
 
                 if (File.Exists(fullPath))
                     SafeDelete(fullPath);
@@ -134,7 +141,7 @@ namespace UnitySkills
                     File.Copy(hashPath, fullPath);
 
                 // Restore the companion .meta file too, if present
-                if (File.Exists(metaHashPath))
+                if (metaHashPath != null && File.Exists(metaHashPath))
                 {
                     string metaDestPath = fullPath + ".meta";
                     if (File.Exists(metaDestPath))
@@ -159,8 +166,8 @@ namespace UnitySkills
         /// <summary>
         /// Deletes store entries whose hash is no longer referenced by any surviving snapshot.
         /// </summary>
-        /// <param name="removedCount">Number of primary hash entries removed.</param>
-        /// <param name="removedBytes">Total bytes reclaimed (including .meta companion files).</param>
+        /// <param name="removedCount">Number of entries removed.</param>
+        /// <param name="removedBytes">Total bytes reclaimed.</param>
         /// <param name="includeRecentWrites">
         /// Only set this when the caller can be sure the reference set is inherently complete (e.g. clearing all history);
         /// otherwise recently written blobs are preserved, see <see cref="RecentWriteGrace"/>.
@@ -187,17 +194,10 @@ namespace UnitySkills
                 try
                 {
                     string hashPath = GetHashPath(entry.hash);
-                    string metaHashPath = GetLegacyMetaHashPath(entry.hash);
-
                     if (File.Exists(hashPath))
                     {
                         removedBytes += new FileInfo(hashPath).Length;
                         SafeDelete(hashPath);
-                    }
-                    if (File.Exists(metaHashPath))
-                    {
-                        removedBytes += new FileInfo(metaHashPath).Length;
-                        SafeDelete(metaHashPath);
                     }
 
                     removedCount++;
@@ -224,6 +224,7 @@ namespace UnitySkills
                 return 0;
 
             long total = 0;
+            WorkflowStore.DirectoryEnumerationsForTests++;
             foreach (var file in Directory.EnumerateFiles(StoreRoot, "*", SearchOption.TopDirectoryOnly))
             {
                 try { total += new FileInfo(file).Length; }
@@ -233,7 +234,7 @@ namespace UnitySkills
         }
 
         /// <summary>
-        /// Lists all stored file entries (primary blobs only, excluding .meta companion files).
+        /// Lists all stored blobs, quarantined ones excluded.
         /// </summary>
         public static List<(string hash, long bytes, DateTime lastWrite)> ListEntries()
         {
@@ -241,11 +242,10 @@ namespace UnitySkills
             if (!Directory.Exists(StoreRoot))
                 return result;
 
+            WorkflowStore.DirectoryEnumerationsForTests++;
             foreach (var file in Directory.EnumerateFiles(StoreRoot, "*", SearchOption.TopDirectoryOnly))
             {
                 string fileName = Path.GetFileName(file);
-                if (fileName.EndsWith(".meta", StringComparison.OrdinalIgnoreCase))
-                    continue;
                 // A quarantined blob is evidence of corruption and must not be reclaimed during cleanup.
                 if (fileName.EndsWith(CorruptSuffix, StringComparison.OrdinalIgnoreCase))
                     continue;
@@ -262,63 +262,38 @@ namespace UnitySkills
         }
 
         /// <summary>
-        /// First removes store entries older than <paramref name="olderThan"/>, then, if needed, deletes from
-        /// oldest to newest until the total size is below <paramref name="maxTotalBytes"/>.
-        /// Blobs still referenced by preserved history are never deleted.
+        /// <see cref="ComputeFileHash"/> for a source asset about to be stored, through the (path, length, last write time)
+        /// cache. Blob integrity checks never use it: they must read the bytes.
         /// </summary>
-        /// <returns>Number of primary hash entries removed.</returns>
-        public static int PruneByAgeAndSize(DateTime? olderThan, long maxTotalBytes,
-            HashSet<string> protectedHashes)
+        private static string ComputeSourceFileHash(string fullPath)
         {
-            if (!Directory.Exists(StoreRoot))
-                return 0;
-
-            var entries = ListEntries().OrderBy(e => e.lastWrite).ToList();
-            long totalBytes = GetStoreSizeBytes();
-            int removed = 0;
-            protectedHashes ??= new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-            foreach (var entry in entries)
+            FileInfo info;
+            try
             {
-                if (protectedHashes.Contains(entry.hash))
-                    continue;
-
-                // Same in-flight protection as CollectGarbage: a recently written blob may belong to a task not yet folded into the history reference set.
-                bool recentWrite = entry.lastWrite >= DateTime.UtcNow - RecentWriteGrace;
-                bool tooOld = olderThan.HasValue && entry.lastWrite < olderThan.Value;
-                bool tooBig = maxTotalBytes > 0 && totalBytes > maxTotalBytes;
-                if (recentWrite || (!tooOld && !tooBig))
-                    continue;
-
-                try
-                {
-                    string hashPath = GetHashPath(entry.hash);
-                    string metaHashPath = GetLegacyMetaHashPath(entry.hash);
-
-                    if (File.Exists(hashPath))
-                    {
-                        totalBytes -= new FileInfo(hashPath).Length;
-                        SafeDelete(hashPath);
-                    }
-                    if (File.Exists(metaHashPath))
-                    {
-                        totalBytes -= new FileInfo(metaHashPath).Length;
-                        SafeDelete(metaHashPath);
-                    }
-
-                    removed++;
-                }
-                catch (Exception ex)
-                {
-                    SkillsLogger.LogWarning($"[WorkflowFileStore] Failed to prune {entry.hash}: {ex.Message}");
-                }
+                info = new FileInfo(fullPath);
+                if (_fileHashCache.TryGetValue(fullPath, out var cached) &&
+                    cached.length == info.Length && cached.lastWriteUtc == info.LastWriteTimeUtc)
+                    return cached.hash;
+            }
+            catch (Exception)
+            {
+                return ComputeFileHash(fullPath);
             }
 
-            if (removed > 0)
+            string hash = ComputeFileHash(fullPath);
+            if (hash != null && DateTime.UtcNow - info.LastWriteTimeUtc > RacyWindow)
             {
-                SkillsLogger.LogWorkflow($"Pruned {removed} store entries; remaining size {FormatBytes(totalBytes)}");
+                if (_fileHashCache.Count >= MaxFileHashCacheEntries)
+                    _fileHashCache.Clear();
+                _fileHashCache[fullPath] = (info.Length, info.LastWriteTimeUtc, hash);
             }
-            return removed;
+            return hash;
+        }
+
+        private static void ForgetSourceFileHash(string fullPath)
+        {
+            _fileHashCache.Remove(fullPath);
+            _fileHashCache.Remove(fullPath + ".meta");
         }
 
         /// <summary>
@@ -326,6 +301,7 @@ namespace UnitySkills
         /// </summary>
         public static string ComputeFileHash(string fullPath)
         {
+            FileHashComputationsForTests++;
             try
             {
                 using (var sha1 = SHA1.Create())
@@ -342,16 +318,29 @@ namespace UnitySkills
             }
         }
 
+        /// <summary>
+        /// Stores a file's content by streaming it, so a large file is never held in memory. Returns its hash, or null when the file
+        /// cannot be hashed or stored.
+        /// </summary>
+        internal static string StoreFileAtPath(string fullPath)
+        {
+            try
+            {
+                string hash = ComputeSourceFileHash(fullPath);
+                return !string.IsNullOrEmpty(hash) && StoreBlob(fullPath, hash) ? hash : null;
+            }
+            catch (Exception ex)
+            {
+                SkillsLogger.LogError($"[WorkflowFileStore] Failed to store file {fullPath}: {ex.Message}");
+                return null;
+            }
+        }
+
         public static string StoreBytes(byte[] bytes)
         {
             if (bytes == null) return null;
 
-            string hash;
-            using (var sha1 = SHA1.Create())
-            {
-                hash = BitConverter.ToString(sha1.ComputeHash(bytes)).Replace("-", "").ToUpperInvariant();
-            }
-
+            string hash = HashBytes(bytes);
             string destinationPath = GetHashPath(hash);
             if (File.Exists(destinationPath))
             {
@@ -365,7 +354,10 @@ namespace UnitySkills
             {
                 File.WriteAllBytes(tmpPath, bytes);
                 if (!File.Exists(destinationPath))
+                {
                     File.Move(tmpPath, destinationPath);
+                    _newBlobBytes += bytes.Length;
+                }
                 else
                     SafeDelete(tmpPath);
                 return hash;
@@ -414,16 +406,52 @@ namespace UnitySkills
             }
         }
 
-        public static string MigrateLegacyMetaHash(string fileHash)
+        /// <summary>
+        /// Reads a blob, verified against its name; a blob whose bytes no longer match is quarantined, as on restore.
+        /// <paramref name="error"/> says why nothing was read.
+        /// </summary>
+        internal static bool TryReadBlob(string hash, out byte[] bytes, out string error)
         {
-            if (string.IsNullOrEmpty(fileHash)) return null;
-            string legacyPath = GetLegacyMetaHashPath(fileHash);
-            if (!File.Exists(legacyPath)) return null;
+            bytes = null;
+            error = null;
+            string path = string.IsNullOrEmpty(hash) ? null : GetHashPath(hash);
+            if (path == null || !File.Exists(path))
+            {
+                error = $"Backup blob {hash ?? "<none>"} is missing from the workflow store, so this change cannot be restored.";
+                return false;
+            }
 
-            string metaHash = ComputeFileHash(legacyPath);
-            return !string.IsNullOrEmpty(metaHash) && StoreBlob(legacyPath, metaHash)
-                ? metaHash
-                : null;
+            try
+            {
+                bytes = File.ReadAllBytes(path);
+            }
+            catch (Exception ex)
+            {
+                error = $"Backup blob {hash} could not be read: {ex.Message}";
+                return false;
+            }
+
+            string actual = HashBytes(bytes);
+            if (string.Equals(actual, hash, StringComparison.OrdinalIgnoreCase))
+                return true;
+            bytes = null;
+            Quarantine(hash, actual);
+            error = LastIntegrityError;
+            return false;
+        }
+
+        /// <summary>Bytes of blobs written since the previous call.</summary>
+        internal static long TakeNewBlobBytes()
+        {
+            long bytes = _newBlobBytes;
+            _newBlobBytes = 0;
+            return bytes;
+        }
+
+        private static string HashBytes(byte[] bytes)
+        {
+            using (var sha1 = SHA1.Create())
+                return BitConverter.ToString(sha1.ComputeHash(bytes)).Replace("-", "").ToUpperInvariant();
         }
 
         /// <summary>
@@ -444,11 +472,6 @@ namespace UnitySkills
             return Path.Combine(StoreRoot, hash.ToUpperInvariant());
         }
 
-        private static string GetLegacyMetaHashPath(string hash)
-        {
-            return Path.Combine(StoreRoot, hash.ToUpperInvariant() + ".meta");
-        }
-
         private static bool StoreBlob(string sourcePath, string hash)
         {
             string hashPath = GetHashPath(hash);
@@ -461,7 +484,10 @@ namespace UnitySkills
             EnsureStoreDirectory();
             WriteAtomically(hashPath, sourcePath);
             TouchBlob(hashPath);
-            return File.Exists(hashPath);
+            if (!File.Exists(hashPath))
+                return false;
+            _newBlobBytes += new FileInfo(hashPath).Length;
+            return true;
         }
 
         /// <summary>
@@ -492,16 +518,20 @@ namespace UnitySkills
 
         /// <summary>
         /// Confirms a stored blob's content still hashes to the name it was filed under; quarantines it as
-        /// "&lt;hash&gt;.corrupt" if not. Legacy "&lt;hash&gt;.meta" companion files are named after the primary
-        /// file's hash rather than their own, so they are never verified here.
+        /// "&lt;hash&gt;.corrupt" if not.
         /// </summary>
         private static bool VerifyBlobIntegrity(string hash)
         {
-            string hashPath = GetHashPath(hash);
-            string actual = ComputeFileHash(hashPath);
+            string actual = ComputeFileHash(GetHashPath(hash));
             if (!string.IsNullOrEmpty(actual) && string.Equals(actual, hash, StringComparison.OrdinalIgnoreCase))
                 return true;
+            Quarantine(hash, actual);
+            return false;
+        }
 
+        private static void Quarantine(string hash, string actual)
+        {
+            string hashPath = GetHashPath(hash);
             string quarantinePath = hashPath + CorruptSuffix;
             try
             {
@@ -518,7 +548,6 @@ namespace UnitySkills
                 $"{Path.GetFileName(quarantinePath)} and the restore was aborted rather than writing bad data.";
 
             SkillsLogger.LogError($"[WorkflowFileStore] {LastIntegrityError}");
-            return false;
         }
 
         private static void EnsureStoreDirectory()

@@ -14,5 +14,7 @@
 /*.csproj
 /*.user
 /.agents/skills/
+/.agents/.unity-skills-backup-*/
 /.claude/skills/
+/.claude/.unity-skills-backup-*/
 __pycache__/

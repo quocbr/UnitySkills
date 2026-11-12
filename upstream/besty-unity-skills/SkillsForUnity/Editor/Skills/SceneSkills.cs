@@ -16,6 +16,9 @@ namespace UnitySkills
     {
         private const string SceneNameNote = "Bare scene name, no '.unity' extension or folder path -- appending either breaks the match against loaded scenes.";
 
+        internal static bool? PlayingOverrideForTests;
+        private static bool IsPlaying => PlayingOverrideForTests ?? EditorApplication.isPlaying;
+
         [UnitySkill("scene_create", "Create a new empty scene",
             Category = SkillCategory.Scene, Operation = SkillOperation.Create,
             Tags = new[] { "new", "empty", "setup" },
@@ -64,7 +67,7 @@ namespace UnitySkills
             return new { success = true, sceneName = scene.name, scenePath = scene.path };
         }
 
-        [UnitySkill("scene_save", "Save the current scene. Undo restores the on-disk .unity file; if the scene is open, reload it (Reload Scene) to see the reverted state.",
+        [UnitySkill("scene_save", "Save the current scene. Undo restores the on-disk .unity file when the scene is closed; while it is open, undo leaves the file alone and marks the scene dirty, so save it to apply.",
             Category = SkillCategory.Scene, Operation = SkillOperation.Execute,
             Tags = new[] { "save", "persist", "write" },
             Outputs = new[] { "scenePath" },
@@ -76,6 +79,19 @@ namespace UnitySkills
         {
             if (!string.IsNullOrEmpty(scenePath) && Validate.SafePath(scenePath, "scenePath") is object pathErr) return pathErr;
 
+            // EditorSceneManager.SaveScene throws during Play Mode, which the router would report as INTERNAL.
+            if (IsPlaying)
+                return new
+                {
+                    error = "Scenes cannot be saved in Play Mode.",
+                    errorCode = SkillErrorCode.SemanticInvalid.ToWireString(),
+                    retryStrategy = SkillErrorResponse.RetryFixAndRetry,
+                    suggestedFixes = new[]
+                    {
+                        new { action = "retry", skill = "editor_stop", reason = "Exit Play Mode first, then save the scene." }
+                    }
+                };
+
             var scene = SceneManager.GetActiveScene();
             var path = scenePath ?? scene.path;
 
@@ -85,7 +101,7 @@ namespace UnitySkills
             // Makes the save reversible. Overwriting an existing .unity counts as Modified: the old bytes must be backed up into the
             // content-addressed store *before* SaveScene overwrites the file (written back to disk on undo). Saving to a brand-new path counts as Created: it must be
             // recorded *after* the file exists (undo moves the new file into the store, redo restores it).
-            // Undo/redo operates on the on-disk file; the currently open scene needs to be reloaded to reflect the change.
+            // Undo/redo operates on the on-disk file when the scene is closed; while it is open, undo marks the scene dirty and the next save applies it.
             bool existedBefore = File.Exists(path);
             if (existedBefore)
             {
@@ -133,13 +149,15 @@ namespace UnitySkills
             };
         }
 
-        [UnitySkill("scene_get_hierarchy", "Get scene hierarchy tree",
+        [UnitySkill("scene_get_hierarchy", "Get the active scene's hierarchy as a JSON tree, inactive objects included. Always the whole scene: there is no rootPath or includeInactive parameter; for one parent's children use batch_query_gameobjects (queryJson parentPath).",
             Category = SkillCategory.Scene, Operation = SkillOperation.Query,
             Tags = new[] { "hierarchy", "tree", "structure" },
             Outputs = new[] { "sceneName", "hierarchy" },
             ReadOnly = true,
             Mode = SkillMode.SemiAuto)]
-        public static object SceneGetHierarchy(int maxDepth = 3)
+        public static object SceneGetHierarchy(
+            [SkillParam("Levels of children expanded below the root objects (0 = roots only). A node cut off by it reports childCount > 0 and no children.")]
+            int maxDepth = 3)
         {
             var scene = SceneManager.GetActiveScene();
             var roots = scene.GetRootGameObjects();
@@ -309,6 +327,19 @@ namespace UnitySkills
             RequiresInput = new[] { "sceneName" })]
         public static object SceneUnload([SkillParam(SceneNameNote)] string sceneName)
         {
+            // Unloading saves a dirty scene first, and EditorSceneManager cannot save in Play Mode.
+            if (IsPlaying)
+                return new
+                {
+                    error = "Scenes cannot be unloaded in Play Mode.",
+                    errorCode = SkillErrorCode.SemanticInvalid.ToWireString(),
+                    retryStrategy = SkillErrorResponse.RetryFixAndRetry,
+                    suggestedFixes = new[]
+                    {
+                        new { action = "retry", skill = "editor_stop", reason = "Exit Play Mode first, then unload the scene." }
+                    }
+                };
+
             Scene sceneToUnload = default;
             for (int i = 0; i < SceneManager.sceneCount; i++)
             {
@@ -360,13 +391,15 @@ namespace UnitySkills
         [UnitySkill("scene_find_objects", "Search GameObjects by name pattern, tag, or component type. For advanced search (regex, layer, path) use gameobject_find.",
             Category = SkillCategory.Scene, Operation = SkillOperation.Query,
             Tags = new[] { "search", "filter", "find", "objects" },
-            Outputs = new[] { "count", "objects", "instanceId", "path" },
+            Outputs = new[] { "count", "totalMatched", "truncated", "objects", "instanceId", "path" },
             ReadOnly = true,
             Mode = SkillMode.SemiAuto)]
         public static object SceneFindObjects(
             [SkillParam("Case-insensitive substring match, not a wildcard or regex pattern (for regex use gameobject_find).")]
             string namePattern = null,
-            string tag = null, string componentType = null, int limit = 50)
+            string tag = null, string componentType = null,
+            [SkillParam("Max objects returned. count is how many came back, totalMatched every match; truncated=true means limit cut the list, so raise it to see the rest.")]
+            int limit = 50)
         {
             IEnumerable<GameObject> objects = GameObjectFinder.GetSceneObjects();
 
@@ -389,12 +422,12 @@ namespace UnitySkills
                 objects = objects.Where(go => go.GetComponent(type) != null);
             }
 
-            var results = objects.Take(limit).Select(go => new {
+            var results = GameObjectSkills.TakeWithTotal(objects, limit, out var total).Select(go => new {
                 name = go.name, path = GameObjectFinder.GetCachedPath(go), entityId = UnityObjectIdUtility.GetEntityId(go), instanceId = UnityObjectIdUtility.GetObjectId(go),
                 active = go.activeInHierarchy, tag = go.tag
             }).ToArray();
 
-            return new { success = true, count = results.Length, objects = results };
+            return new { success = true, count = results.Length, totalMatched = total, truncated = total > results.Length, objects = results };
         }
 
         // SaveScene reports failure (read-only or locked file or folder) only through its bool; ignoring it

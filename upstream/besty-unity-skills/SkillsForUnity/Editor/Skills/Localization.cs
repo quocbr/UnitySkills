@@ -4,6 +4,7 @@ using System.IO;
 using UnityEditor;
 using UnityEngine;
 using Newtonsoft.Json;
+using UnitySkills.Internal;
 
 namespace UnitySkills
 {
@@ -34,6 +35,8 @@ namespace UnitySkills
 
         static SkillsLocalization()
         {
+            if (ImportWorkerGate.IsWorkerProcess) return;
+
             EnsureLoaded();
         }
 
@@ -96,6 +99,16 @@ namespace UnitySkills
             if (ReadPinned(otherKey, otherKey == PREF_PINNED_PRIMARY ? DefaultLanguage : Language.English) == value)
                 EditorPrefs.SetInt(otherKey, (int)previous);
             EditorPrefs.SetInt(key, (int)value);
+
+            // The footer can only highlight a pinned language, so a current language that just lost
+            // its slot follows the language chosen for it. Assigned before the event so handlers
+            // render the new language.
+            var current = Current;
+            if (current != PinnedPrimary && current != PinnedSecondary)
+            {
+                _current = value;
+                EditorPrefs.SetInt(PREF_LANGUAGE, (int)value);
+            }
             LanguageChanged?.Invoke();
         }
 

@@ -5,9 +5,12 @@ using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
+using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
+using UnitySkills.Internal;
 
 namespace UnitySkills
 {
@@ -16,6 +19,10 @@ namespace UnitySkills
     /// </summary>
     public static class SkillInstaller
     {
+        // Every install writes these two template folders side by side into the same skills directory.
+        internal const string SkillFolderName = "unity-skills";
+        internal const string EvalSkillFolderName = "unity-skills-eval";
+
         // Claude Code path: Claude accepts any folder name
         public static string ClaudeProjectPath => Path.Combine(Application.dataPath, "..", ".claude", "skills", "unity-skills");
         public static string ClaudeGlobalPath => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude", "skills", "unity-skills");
@@ -92,7 +99,7 @@ namespace UnitySkills
             {
                 var targetPath = global ? ClaudeGlobalPath : ClaudeProjectPath;
                 return InstallSkill(targetPath, "Claude Code", AgentInstructionService.AgentClaudeCode,
-                    AgentInstructionService.GetInstructionFilePath(AgentInstructionService.AgentClaudeCode, global));
+                    AgentInstructionService.GetInstructionFilePath(AgentInstructionService.AgentClaudeCode, global), withEvalSkill: !IsWorkbenchPackage);
             }
             catch (Exception ex)
             {
@@ -106,7 +113,7 @@ namespace UnitySkills
             {
                 var targetPath = global ? AntigravityGlobalPath : AntigravityProjectPath;
                 return InstallSkill(targetPath, "Antigravity", AgentInstructionService.AgentAntigravity,
-                    AgentInstructionService.GetInstructionFilePath(AgentInstructionService.AgentAntigravity, global));
+                    AgentInstructionService.GetInstructionFilePath(AgentInstructionService.AgentAntigravity, global), withEvalSkill: !IsWorkbenchPackage);
             }
             catch (Exception ex)
             {
@@ -146,7 +153,7 @@ namespace UnitySkills
             {
                 var targetPath = global ? CodexGlobalPath : CodexProjectPath;
                 return InstallSkill(targetPath, "Codex", AgentInstructionService.AgentCodex,
-                    AgentInstructionService.GetInstructionFilePath(AgentInstructionService.AgentCodex, global));
+                    AgentInstructionService.GetInstructionFilePath(AgentInstructionService.AgentCodex, global), withEvalSkill: !IsWorkbenchPackage);
             }
             catch (Exception ex)
             {
@@ -173,7 +180,7 @@ namespace UnitySkills
             {
                 var targetPath = global ? CursorGlobalPath : CursorProjectPath;
                 return InstallSkill(targetPath, "Cursor", AgentInstructionService.AgentCursor,
-                    AgentInstructionService.GetInstructionFilePath(AgentInstructionService.AgentCursor, global));
+                    AgentInstructionService.GetInstructionFilePath(AgentInstructionService.AgentCursor, global), withEvalSkill: !IsWorkbenchPackage);
             }
             catch (Exception ex)
             {
@@ -200,7 +207,7 @@ namespace UnitySkills
             {
                 var targetPath = global ? OpenCodeGlobalPath : OpenCodeProjectPath;
                 return InstallSkill(targetPath, "OpenCode", AgentInstructionService.AgentOpenCode,
-                    AgentInstructionService.GetInstructionFilePath(AgentInstructionService.AgentOpenCode, global));
+                    AgentInstructionService.GetInstructionFilePath(AgentInstructionService.AgentOpenCode, global), withEvalSkill: !IsWorkbenchPackage);
             }
             catch (Exception ex)
             {
@@ -227,7 +234,7 @@ namespace UnitySkills
             {
                 var targetPath = global ? KimiCodeGlobalPath : KimiCodeProjectPath;
                 return InstallSkill(targetPath, "Kimi Code", AgentInstructionService.AgentKimiCode,
-                    AgentInstructionService.GetInstructionFilePath(AgentInstructionService.AgentKimiCode, global));
+                    AgentInstructionService.GetInstructionFilePath(AgentInstructionService.AgentKimiCode, global), withEvalSkill: !IsWorkbenchPackage);
             }
             catch (Exception ex)
             {
@@ -384,13 +391,147 @@ namespace UnitySkills
                 if (string.IsNullOrEmpty(path))
                     return (false, "Path cannot be empty");
 
-                return InstallSkill(path, "Custom Path", agentName);
+                return InstallSkill(path, "Custom Path", agentName, withEvalSkill: false);
             }
             catch (Exception ex)
             {
                 return (false, ex.Message);
             }
         }
+
+        // Custom installs the panel lists and the post-upgrade sync refreshes. Global EditorPrefs, so every project on
+        // this machine sees them; a custom path is absolute and belongs to no project. Only the AI Config tab adds
+        // entries: InstallCustom itself never does, so tests and scripts installing into temp folders leave no trace.
+        internal const string CustomTargetsPrefKey = "UnitySkills_CustomInstallTargets";
+
+        internal sealed class CustomTarget
+        {
+            public string name;
+            public string path;
+            public string icon;  // Absolute path of the icon copy in the icon folder; null shows the name's first letter
+        }
+
+        // Icon copies live beside the instance registry, machine-wide like the list itself, so moving or deleting the
+        // picked original never breaks a card.
+        internal static readonly string CustomIconDir = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".unity_skills", "custom-icons");
+        internal const long MaxIconBytes = 1024 * 1024;
+
+        /// <summary>Null when <paramref name="file"/> can be an icon (a PNG or JPG of at most 1 MB), else a localization key.</summary>
+        internal static string CheckIconFile(string file)
+        {
+            string ext = Path.GetExtension(file ?? string.Empty).ToLowerInvariant();
+            bool image = ext == ".png" || ext == ".jpg" || ext == ".jpeg";
+            return image && File.Exists(file) && new FileInfo(file).Length <= MaxIconBytes ? null : "agent_custom_icon_invalid";
+        }
+
+        /// <summary>
+        /// Sets the icon of the remembered install at <paramref name="path"/> to a copy of <paramref name="iconSourceFile"/>,
+        /// or back to the first letter when it is null. Returns null on success, else a localization key.
+        /// </summary>
+        internal static string SetCustomTargetIcon(string path, string iconSourceFile, string prefKey = CustomTargetsPrefKey, string iconDir = null)
+        {
+            iconDir ??= CustomIconDir;
+            var targets = ReadCustomTargets(prefKey);
+            var target = targets.FirstOrDefault(t => SamePath(t.path, path));
+            if (target == null)
+                return "agent_custom_icon_invalid";
+
+            string copy = null;
+            if (iconSourceFile != null)
+            {
+                if (CheckIconFile(iconSourceFile) is string error)
+                    return error;
+                byte[] bytes = File.ReadAllBytes(iconSourceFile);
+                string hash;
+                using (var sha1 = SHA1.Create())
+                    hash = BitConverter.ToString(sha1.ComputeHash(bytes)).Replace("-", string.Empty).ToLowerInvariant();
+                Directory.CreateDirectory(iconDir);
+                copy = Path.Combine(iconDir, hash + Path.GetExtension(iconSourceFile).ToLowerInvariant());
+                if (!File.Exists(copy))
+                    File.WriteAllBytes(copy, bytes);
+            }
+
+            string previous = target.icon;
+            target.icon = copy;
+            WriteCustomTargets(targets, prefKey);
+            DeleteUnusedIcon(previous, targets, iconDir);
+            return null;
+        }
+
+        /// <summary>Deletes an icon copy no remembered install uses any more; only files inside the icon folder are touched.</summary>
+        private static void DeleteUnusedIcon(string icon, List<CustomTarget> targets, string iconDir)
+        {
+            if (string.IsNullOrEmpty(icon) || targets.Any(t => t.icon != null && SamePath(t.icon, icon)))
+                return;
+            if (!SamePath(Path.GetDirectoryName(icon), iconDir))
+                return;
+            try { File.Delete(icon); }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+
+        internal static List<CustomTarget> ReadCustomTargets(string prefKey = CustomTargetsPrefKey)
+        {
+            try
+            {
+                return JsonConvert.DeserializeObject<List<CustomTarget>>(EditorPrefs.GetString(prefKey, "[]"), SkillsCommon.JsonSettings)?
+                    .Where(t => t != null && !string.IsNullOrEmpty(t.path)).ToList() ?? new List<CustomTarget>();
+            }
+            catch (JsonException)
+            {
+                return new List<CustomTarget>();
+            }
+        }
+
+        /// <summary>Adds the install at <paramref name="path"/>, or renames the existing entry for the same folder.</summary>
+        internal static void RememberCustomTarget(string name, string path, string prefKey = CustomTargetsPrefKey)
+        {
+            var full = NormalizeTargetPath(path);
+            var targets = ReadCustomTargets(prefKey);
+            var existing = targets.FirstOrDefault(t => SamePath(t.path, full));
+            if (existing != null)
+                existing.name = name;
+            else
+                targets.Add(new CustomTarget { name = name, path = full });
+            WriteCustomTargets(targets, prefKey);
+        }
+
+        /// <summary>Drops the entry for <paramref name="path"/> from the list; the installed files stay where they are.</summary>
+        internal static void ForgetCustomTarget(string path, string prefKey = CustomTargetsPrefKey, string iconDir = null)
+        {
+            var targets = ReadCustomTargets(prefKey);
+            var removed = targets.Where(t => SamePath(t.path, path)).ToList();
+            if (removed.Count == 0)
+                return;
+            targets.RemoveAll(removed.Contains);
+            WriteCustomTargets(targets, prefKey);
+            foreach (var target in removed)
+                DeleteUnusedIcon(target.icon, targets, iconDir ?? CustomIconDir);
+        }
+
+        /// <summary>One install target per remembered custom install; it installs the main skill only, like InstallCustom.</summary>
+        public static IEnumerable<InstallTarget> EnumerateCustomTargets() => EnumerateCustomTargets(CustomTargetsPrefKey);
+
+        internal static IEnumerable<InstallTarget> EnumerateCustomTargets(string prefKey)
+        {
+            foreach (var target in ReadCustomTargets(prefKey))
+            {
+                string path = target.path, name = target.name;
+                yield return MakeTarget(name, true, name, path, () => File.Exists(Path.Combine(path, "SKILL.md")),
+                    () => InstallSkill(path, "Custom Path", name, withEvalSkill: false));
+            }
+        }
+
+        private static void WriteCustomTargets(List<CustomTarget> targets, string prefKey) =>
+            EditorPrefs.SetString(prefKey, JsonConvert.SerializeObject(targets, SkillsCommon.JsonSettings));
+
+        private static string NormalizeTargetPath(string path) =>
+            Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+
+        private static bool SamePath(string a, string b) =>
+            string.Equals(NormalizeTargetPath(a), NormalizeTargetPath(b),
+                Application.platform == RuntimePlatform.WindowsEditor ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
 
         // internal: the uninstall regression tests drive this against a temp target directly (tests are
         // InternalsVisibleTo this assembly), so the fixture never has to reach a real install location.
@@ -399,32 +540,47 @@ namespace UnitySkills
             if (!Directory.Exists(targetPath))
                 return (false, $"{name} skill not installed at this location");
 
-            SkillTemplate template;
-            try { template = OpenSkillTemplate(); }
-            catch (DirectoryNotFoundException)
-            {
-                // Exotic setup without a resolvable template: fall back to removing the whole
-                // destination directory, which may also take files the user added into it.
-                SkillsLogger.LogWarning("Uninstalling via full directory delete because the skill template root could not be resolved; user-added files under " + targetPath + " may be removed.");
-                Directory.Delete(targetPath, true);
-                SkillsLogger.Log("Uninstalled skill from: " + targetPath);
-                return (true, targetPath);
-            }
-
-            using (template)
-                DeleteInstalledTemplateTree(template.Root, targetPath);
+            UninstallFolder(targetPath, () => OpenTemplate(SkillFolderName));
+            UninstallFolder(EvalSkillFolderPath(targetPath), () => OpenTemplate(EvalSkillFolderName));
             SkillsLogger.Log("Uninstalled skill from: " + targetPath);
             return (true, targetPath);
         }
 
+        private static void UninstallFolder(string folderPath, Func<SkillTemplate> openTemplate)
+        {
+            if (!Directory.Exists(folderPath))
+                return;
+
+            SkillTemplate template;
+            try { template = openTemplate(); }
+            catch (DirectoryNotFoundException)
+            {
+                // Exotic setup without a resolvable template: fall back to removing the whole
+                // destination directory, which may also take files the user added into it.
+                SkillsLogger.LogWarning("Uninstalling via full directory delete because the skill template root could not be resolved; user-added files under " + folderPath + " may be removed.");
+                Directory.Delete(folderPath, true);
+                return;
+            }
+
+            using (template)
+                DeleteInstalledTemplateTree(template.Root, folderPath);
+        }
+
         /// <summary>
-        /// Removes only the paths the installed template owns: every template file mirrored under
-        /// <paramref name="targetPath"/>, the installer-written scripts/agent_config.json (not part of
-        /// the template), then the now-empty directories of the template tree deepest-first. Files the
+        /// Removes only the paths the installed template owns: files an earlier template installed that the current
+        /// one no longer ships (<see cref="RemoveRetiredFiles"/>), every template file mirrored under
+        /// <paramref name="targetPath"/>, the installer-written scripts/agent_config.json and install manifest (not part
+        /// of the template), then the now-empty directories of the template tree deepest-first. Files the
         /// user added keep their directories — and the destination root — alive.
         /// </summary>
         private static void DeleteInstalledTemplateTree(string templateRoot, string targetPath)
         {
+            var templateFiles = Directory.GetFiles(templateRoot, "*", SearchOption.AllDirectories)
+                .Select(file => Path.GetRelativePath(templateRoot, file))
+                .Where(relativePath => !ShouldSkipTemplatePath(relativePath))
+                .Select(ToManifestPath);
+            RemoveRetiredFiles(targetPath, ReadInstallManifest(targetPath), templateFiles);
+
             var templateDirectories = Directory.GetDirectories(templateRoot, "*", SearchOption.AllDirectories)
                 .Select(path => Path.GetRelativePath(templateRoot, path))
                 .Where(relativePath => !ShouldSkipTemplatePath(relativePath))
@@ -456,10 +612,13 @@ namespace UnitySkills
                 NextFile:;
             }
 
-            // Installer-written version stamp, skipped from the template copy itself.
+            // Installer-written version stamp and manifest, skipped from the template copy itself.
             string agentConfig = Path.Combine(targetPath, "scripts", "agent_config.json");
             if (File.Exists(agentConfig))
                 File.Delete(agentConfig);
+            string manifest = InstallManifestPath(targetPath);
+            if (File.Exists(manifest))
+                File.Delete(manifest);
 
             foreach (var relativePath in templateDirectories
                 .OrderByDescending(path => path.Count(c => c == Path.DirectorySeparatorChar || c == Path.AltDirectorySeparatorChar))
@@ -482,15 +641,39 @@ namespace UnitySkills
                 .TrimEnd(Path.DirectorySeparatorChar);
         }
 
-        private static (bool success, string message) InstallSkill(string targetPath, string name, string agentId, string instructionFilePath = null)
+        /// <summary>
+        /// Installs the runtime skill into <paramref name="targetPath"/> and, when <paramref name="withEvalSkill"/> is set,
+        /// the evaluation skill into its sibling folder in the same skills directory. Both templates resolve before either folder is written.
+        /// A custom path is the skill folder the user picked, so it never gets a sibling.
+        /// </summary>
+        // internal: the installer tests seed a temp skills directory through it (tests are InternalsVisibleTo this assembly).
+        internal static (bool success, string message) InstallSkill(string targetPath, string name, string agentId, string instructionFilePath = null, bool withEvalSkill = true)
+        {
+            using var skillTemplate = OpenTemplate(SkillFolderName);
+            using var evalTemplate = withEvalSkill ? OpenTemplate(EvalSkillFolderName) : null;
+            InstallFolder(targetPath, skillTemplate.Root, agentId);
+            if (evalTemplate != null)
+                InstallFolder(EvalSkillFolderPath(targetPath), evalTemplate.Root, agentId);
+
+            // Optional "prefer Unity Skills" guide line in the tool's root instruction file
+            // (CLAUDE.md / AGENTS.md / GEMINI.md). Gated by the feature toggle inside the service.
+            if (instructionFilePath != null)
+                AgentInstructionService.UpsertIfEnabled(instructionFilePath);
+
+            SkillsLogger.Log($"Installed skill to: {targetPath} (Agent: {agentId})");
+            return (true, targetPath);
+        }
+
+        /// <summary>Copies one template folder into <paramref name="targetPath"/>, then writes its agent config and install manifest.</summary>
+        private static void InstallFolder(string targetPath, string templateRoot, string agentId)
         {
             if (!Directory.Exists(targetPath))
                 Directory.CreateDirectory(targetPath);
 
             // Must use UTF-8 without BOM: if a BOM (EF BB BF) appears before the leading `---`, some agents refuse to parse the YAML frontmatter.
             var utf8NoBom = SkillsCommon.Utf8NoBom;
-            using (var template = OpenSkillTemplate())
-                CopyTemplateDirectory(template.Root, targetPath, utf8NoBom);
+            var previousManifest = ReadInstallManifest(targetPath);
+            var installed = CopyTemplateDirectory(templateRoot, targetPath, utf8NoBom);
 
             // Write agent config for automatic agent identity detection
             var scriptsPath = Path.Combine(targetPath, "scripts");
@@ -501,14 +684,16 @@ namespace UnitySkills
             var agentConfig = $"{{\"agentId\": \"{agentId}\", \"version\": \"{SkillsLogger.Version}\", \"installedAt\": \"{DateTime.UtcNow:O}\"}}";
             File.WriteAllText(Path.Combine(scriptsPath, "agent_config.json"), agentConfig, utf8NoBom);
 
-            // Optional "prefer Unity Skills" guide line in the tool's root instruction file
-            // (CLAUDE.md / AGENTS.md / GEMINI.md). Gated by the feature toggle inside the service.
-            if (instructionFilePath != null)
-                AgentInstructionService.UpsertIfEnabled(instructionFilePath);
-
-            SkillsLogger.Log($"Installed skill to: {targetPath} (Agent: {agentId})");
-            return (true, targetPath);
+            RemoveRetiredFiles(targetPath, previousManifest, installed.Keys);
+            var manifest = new InstallManifest { version = SkillsLogger.Version };
+            foreach (var pair in installed.OrderBy(p => p.Key, StringComparer.Ordinal))
+                manifest.files[pair.Key] = pair.Value;
+            File.WriteAllText(InstallManifestPath(targetPath), JsonConvert.SerializeObject(manifest, Formatting.Indented), utf8NoBom);
         }
+
+        /// <summary>The evaluation skill's folder beside the runtime skill's <paramref name="targetPath"/>, in the same skills directory.</summary>
+        private static string EvalSkillFolderPath(string targetPath) =>
+            Path.Combine(Path.GetDirectoryName(targetPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)), EvalSkillFolderName);
 
         private sealed class SkillTemplate : IDisposable
         {
@@ -551,7 +736,6 @@ namespace UnitySkills
         }
 
         private const string WorkbenchRevisionFile = "workbench-revision.txt";
-        private const string PreviousWorkbenchVersion = "2.9.1";
         private static readonly Lazy<bool> _isWorkbenchPackage = new Lazy<bool>(() =>
         {
             var path = GetSkillPackagePath();
@@ -563,8 +747,8 @@ namespace UnitySkills
         internal static InstalledVersionState CompareInstalledCopy(string installedVersion, string targetPath)
         {
             var state = CompareInstalledVersion(installedVersion, SkillsLogger.Version);
-            // The first Workbench release has its own version line; recognize older Workbench content by its template.
-            if ((state == InstalledVersionState.Current || installedVersion == PreviousWorkbenchVersion) &&
+            // The unified template can change without a new upstream package version.
+            if (state == InstalledVersionState.Current &&
                 !string.IsNullOrEmpty(targetPath) && HasWorkbenchTemplateUpdate(targetPath))
                 return InstalledVersionState.Older;
             return state;
@@ -610,17 +794,13 @@ namespace UnitySkills
         private static string GetWorkbenchArchivePath(string packagePath) =>
             Path.Combine(packagePath, "workbench-skill~", "template.zip");
 
-        private static string GetSkillPackagePath()
-        {
-            var packageInfo = UnityEditor.PackageManager.PackageInfo.FindForAssembly(typeof(SkillInstaller).Assembly);
-            if (!string.IsNullOrEmpty(packageInfo?.resolvedPath)) return packageInfo.resolvedPath;
-            return UnityEditor.PackageManager.PackageInfo.FindForAssetPath("Packages/com.besty.unity-skills")?.resolvedPath;
-        }
+        private static string GetSkillPackagePath() =>
+            PackageRootLocator.TryGet(out var resolvedPath) ? resolvedPath : null;
 
-        private static SkillTemplate OpenSkillTemplate()
+        private static SkillTemplate OpenTemplate(string folderName)
         {
             // 1. Project root (development / local clone)
-            var templateRoot = GetProjectTemplatePath();
+            var templateRoot = Path.GetFullPath(Path.Combine(Application.dataPath, "..", folderName));
             if (Directory.Exists(templateRoot))
                 return new SkillTemplate(templateRoot);
 
@@ -628,34 +808,38 @@ namespace UnitySkills
             var resolvedPath = GetSkillPackagePath();
             if (!string.IsNullOrEmpty(resolvedPath))
             {
-                var archive = GetWorkbenchArchivePath(resolvedPath);
-                if (File.Exists(archive))
-                    return SkillTemplate.Extract(archive);
+                if (folderName == SkillFolderName)
+                {
+                    var archive = GetWorkbenchArchivePath(resolvedPath);
+                    if (File.Exists(archive))
+                        return SkillTemplate.Extract(archive);
+                }
 
-                // Original template retained for upstream compatibility.
-                templateRoot = Path.GetFullPath(Path.Combine(resolvedPath, "unity-skills~"));
+                templateRoot = Path.GetFullPath(Path.Combine(resolvedPath, folderName + "~"));
                 if (Directory.Exists(templateRoot))
                     return new SkillTemplate(templateRoot);
 
                 // Sibling of the package root (the case of a full-repo clone via git ?path=)
-                templateRoot = Path.GetFullPath(Path.Combine(resolvedPath, "..", "unity-skills"));
+                templateRoot = Path.GetFullPath(Path.Combine(resolvedPath, "..", folderName));
                 if (Directory.Exists(templateRoot))
                     return new SkillTemplate(templateRoot);
 
                 // Subdirectory of the package root
-                templateRoot = Path.GetFullPath(Path.Combine(resolvedPath, "unity-skills"));
+                templateRoot = Path.GetFullPath(Path.Combine(resolvedPath, folderName));
                 if (Directory.Exists(templateRoot))
                     return new SkillTemplate(templateRoot);
             }
 
             throw new DirectoryNotFoundException(
-                $"unity-skills template folder not found. " +
+                $"{folderName} template folder not found. " +
                 $"Checked: project root, package path ({resolvedPath ?? "N/A"}). " +
                 $"Please reinstall the package.");
         }
 
-        private static void CopyTemplateDirectory(string sourceRoot, string targetRoot, Encoding encoding)
+        /// <summary>Copies the template and returns each written file's manifest path and content hash.</summary>
+        private static Dictionary<string, string> CopyTemplateDirectory(string sourceRoot, string targetRoot, Encoding encoding)
         {
+            var installed = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             foreach (var directory in Directory.GetDirectories(sourceRoot, "*", SearchOption.AllDirectories))
             {
                 string relativePath = Path.GetRelativePath(sourceRoot, directory);
@@ -677,7 +861,9 @@ namespace UnitySkills
                     Directory.CreateDirectory(destinationDirectory);
 
                 WriteTemplateFile(file, destination, encoding);
+                installed[ToManifestPath(relativePath)] = HashFile(destination);
             }
+            return installed;
         }
 
         private static bool ShouldSkipTemplatePath(string relativePath)
@@ -686,7 +872,111 @@ namespace UnitySkills
             return normalized.Contains("/__pycache__/") ||
                    normalized.EndsWith("/__pycache__", StringComparison.OrdinalIgnoreCase) ||
                    normalized.EndsWith(".pyc", StringComparison.OrdinalIgnoreCase) ||
-                   normalized.EndsWith("agent_config.json", StringComparison.OrdinalIgnoreCase);
+                   normalized.EndsWith("agent_config.json", StringComparison.OrdinalIgnoreCase) ||
+                   normalized.EndsWith(InstallManifestFileName, StringComparison.OrdinalIgnoreCase);
+        }
+
+        internal const string InstallManifestFileName = "install_manifest.json";
+
+        /// <summary>
+        /// Template files removed before install manifests existed; copies made by 2.9.x and earlier carry no manifest,
+        /// so these names are how such a copy sheds them. Frozen: from 3.0 on, the manifest finds removed files.
+        /// </summary>
+        private static readonly string[] LegacyRetiredTemplatePaths =
+        {
+            "references/SKILL_FULL.md",
+            "references/getting_started.md",
+            "skills/detailed_report.txt",
+            "test_cinemachine_deep.py",
+            "test_cinemachine_v16.py",
+        };
+
+        /// <summary>What an install wrote: template paths (forward slashes) and the SHA256 of each installed file.</summary>
+        private sealed class InstallManifest
+        {
+            public int schemaVersion = 1;
+            public string version;
+            public Dictionary<string, string> files = new Dictionary<string, string>();
+        }
+
+        private static string InstallManifestPath(string targetPath) =>
+            Path.Combine(targetPath, "scripts", InstallManifestFileName);
+
+        private static string ToManifestPath(string relativePath) => relativePath.Replace('\\', '/');
+
+        /// <summary>The manifest of the copy at <paramref name="targetPath"/>, or null when it has none or it is unreadable.</summary>
+        private static InstallManifest ReadInstallManifest(string targetPath)
+        {
+            try
+            {
+                string path = InstallManifestPath(targetPath);
+                if (!File.Exists(path))
+                    return null;
+                var manifest = JsonConvert.DeserializeObject<InstallManifest>(File.ReadAllText(path, Encoding.UTF8));
+                return manifest?.files != null ? manifest : null;
+            }
+            catch (Exception)
+            {
+                // A corrupt manifest is treated like a copy made before manifests existed.
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Deletes files an earlier install wrote that are not in <paramref name="keep"/>, then the directories that
+        /// leaves empty (never <paramref name="targetPath"/> itself). With a manifest, a file goes only while its
+        /// content still matches what was installed, so a hand-edited retired file survives; a copy without one is
+        /// cleaned by <see cref="LegacyRetiredTemplatePaths"/>. <paramref name="keep"/> is compared case-insensitively:
+        /// on a case-insensitive file system a case-only rename names the file just written.
+        /// </summary>
+        private static void RemoveRetiredFiles(string targetPath, InstallManifest previous, IEnumerable<string> keep)
+        {
+            var kept = new HashSet<string>(keep, StringComparer.OrdinalIgnoreCase);
+            var candidates = previous != null
+                ? previous.files.Select(pair => (path: pair.Key, hash: pair.Value))
+                : LegacyRetiredTemplatePaths.Select(path => (path, hash: (string)null));
+
+            foreach (var (relativePath, hash) in candidates)
+            {
+                if (string.IsNullOrEmpty(relativePath) || kept.Contains(relativePath) || !IsContainedRelativePath(relativePath))
+                    continue;
+
+                string file = Path.Combine(targetPath, relativePath);
+                if (!File.Exists(file))
+                    continue;
+                if (previous != null && !string.Equals(HashFile(file), hash, StringComparison.OrdinalIgnoreCase))
+                {
+                    SkillsLogger.LogVerbose($"Kept a retired skill file changed since it was installed: {file}");
+                    continue;
+                }
+
+                File.Delete(file);
+                DeleteEmptyParents(Path.GetDirectoryName(file), targetPath);
+            }
+        }
+
+        /// <summary>A manifest is a file in the user's folder: only relative paths that stay inside the copy are honoured.</summary>
+        private static bool IsContainedRelativePath(string relativePath) =>
+            !Path.IsPathRooted(relativePath) && !relativePath.Split('/', '\\').Contains("..");
+
+        private static void DeleteEmptyParents(string directory, string targetPath)
+        {
+            string root = Path.GetFullPath(targetPath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            string current = Path.GetFullPath(directory);
+            while (current.Length > root.Length &&
+                   current.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) &&
+                   Directory.Exists(current) && !Directory.EnumerateFileSystemEntries(current).Any())
+            {
+                Directory.Delete(current);
+                current = Path.GetDirectoryName(current);
+            }
+        }
+
+        private static string HashFile(string path)
+        {
+            using (var sha = SHA256.Create())
+            using (var stream = File.OpenRead(path))
+                return BitConverter.ToString(sha.ComputeHash(stream)).Replace("-", string.Empty);
         }
 
         private static void WriteTemplateFile(string sourceFile, string destinationFile, Encoding encoding)

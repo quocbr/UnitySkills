@@ -18,26 +18,6 @@ namespace UnitySkills
         /// Target location is delegated to <see cref="CollectTargetsFromArgs"/>,
         /// so the semantic diff's pre-capture reuses exactly the same object set, order, and best-effort semantics.
         /// </summary>
-        /// <summary>
-        /// Whether the current manually-recorded session (workflow_begin_task) has anything new to persist since the last SaveHistory --
-        /// i.e. a different task is now active, or the active task gained new snapshots. Every time it returns true, it advances the saved marker,
-        /// so the next call compares against this save point. Best-effort: defaults to saving on any anomaly (a null task),
-        /// to guarantee history is never silently dropped.
-        /// </summary>
-        private static bool ManualSessionIsDirty(WorkflowTask currentTask)
-        {
-            if (currentTask == null)
-                return true; // shouldn't happen while IsRecording; save defensively
-
-            int count = currentTask.snapshots?.Count ?? 0;
-            if (currentTask.id == _lastSavedTaskId && count == _lastSavedSnapshotCount)
-                return false;
-
-            _lastSavedTaskId = currentTask.id;
-            _lastSavedSnapshotCount = count;
-            return true;
-        }
-
         private static void TrySnapshotTargetsFromArgs(JObject args)
         {
             try
@@ -49,6 +29,64 @@ namespace UnitySkills
             {
                 SkillsLogger.LogWarning($"Workflow snapshot failed: {ex.Message}");
             }
+        }
+
+        /// <summary>The envelope's <c>_checkpoint</c> label; false when absent, null or empty (a non-string is rejected by validation).</summary>
+        private static bool TryReadCheckpointLabel(JObject args, out string label)
+        {
+            label = null;
+            if (args.TryGetValue(CheckpointParameterName, StringComparison.OrdinalIgnoreCase, out var token) &&
+                token.Type == JTokenType.String)
+                label = token.Value<string>();
+            return !string.IsNullOrEmpty(label);
+        }
+
+        // Argument names that name a call's main target, in the order the compact workflow list prefers them.
+        private static readonly string[] WorkflowTargetParameters =
+        {
+            "name", "path", "childName", "objectName", "gameObjectName", "targetName", "assetPath", "materialPath",
+            "prefabPath", "scriptName", "sceneName", "scenePath", "folder", "folderPath", "sourcePath", "controllerPath"
+        };
+
+        private const int MaxWorkflowTargetChars = 32;
+
+        /// <summary>
+        /// A short label for the task list: the first target-naming argument, and "xN" for an items[] batch. Never throws;
+        /// null when the arguments name nothing (the list then shows the skill alone).
+        /// </summary>
+        internal static string DescribeWorkflowTarget(JObject args)
+        {
+            if (args == null)
+                return null;
+
+            string target = null;
+            foreach (var key in WorkflowTargetParameters)
+            {
+                if (args.TryGetValue(key, StringComparison.OrdinalIgnoreCase, out var token) &&
+                    token.Type == JTokenType.String && !string.IsNullOrWhiteSpace(token.Value<string>()))
+                {
+                    target = token.Value<string>().Trim().Replace('\n', ' ').Replace('\r', ' ');
+                    break;
+                }
+            }
+            if (target != null && target.Length > MaxWorkflowTargetChars)
+                target = target.Substring(0, MaxWorkflowTargetChars - 3) + "...";
+
+            int itemCount = 0;
+            if (args.TryGetValue("items", StringComparison.OrdinalIgnoreCase, out var itemsToken))
+            {
+                try
+                {
+                    if (itemsToken.Type == JTokenType.String)
+                        itemsToken = JToken.Parse(itemsToken.Value<string>());
+                    itemCount = (itemsToken as JArray)?.Count ?? 0;
+                }
+                catch { /* A malformed items payload just leaves the count out */ }
+            }
+
+            if (itemCount > 0)
+                return target == null ? "x" + itemCount : target + " x" + itemCount;
+            return target;
         }
 
         /// <summary>
@@ -144,6 +182,9 @@ namespace UnitySkills
             {
                 try
                 {
+                    // items arrives as a native array or as a JSON string holding one; both name the same targets.
+                    if (itemsToken.Type == JTokenType.String)
+                        itemsToken = JToken.Parse(itemsToken.Value<string>());
                     var items = itemsToken.ToObject<List<Dictionary<string, object>>>();
                     if (items != null)
                     {

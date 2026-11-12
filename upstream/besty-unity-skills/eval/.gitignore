@@ -1,0 +1,4 @@
+# local-only: run artifacts (transcripts, reports), frozen docs, baselines, reserved task variants
+runs/
+reserved/
+__pycache__/

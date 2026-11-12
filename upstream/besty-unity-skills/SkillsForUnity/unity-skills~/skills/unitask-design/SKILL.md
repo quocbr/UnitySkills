@@ -3,24 +3,13 @@ name: unity-unitask-design
 description: Source-anchored design rules for UniTask 2.5.10 and 2.5.11
 ---
 
-> **Before calling any skill in this module:** if you are about to call a skill with parameters guessed from its name or description, STOP — read this file (or fetch its schema via `GET /skills/recommend?includeSchema=true`) first. If you already have the parameter definitions from recommend/schema, you may proceed straight to dryRun.
-
-## Triggers
-- Writing or reviewing async UniTask code
-- Choosing PlayerLoopTiming
-- Handling CancellationToken
-- Composing WhenAll/WhenAny
-- 编写或审查 async UniTask 代码、选择 PlayerLoopTiming、处理 CancellationToken、组合 WhenAll/WhenAny
-
 # UniTask - Design Rules
 
 Advisory module. The source anchors below were checked against Cysharp UniTask **2.5.10** and have not been re-audited against 2.5.11. The [2.5.11 release](https://github.com/Cysharp/UniTask/releases/tag/2.5.11) lists a Unity 6.2+ Editor TreeView compatibility fix and does not list a runtime API change. Use this guide with `com.cysharp.unitask@2.5.10` or `@2.5.11`, after checking the target project's resolved package version.
 
 Each rule cites a concrete file/line so the reasoning is auditable and the AI does not improvise against stale memory.
 
-> **Mode**: Documentation only — no REST skills to gate; load freely under any operating mode (Approval / Auto / Bypass).
-
-## When to Load This Module
+## When to use
 
 Load before writing or reviewing any of:
 

@@ -28,8 +28,9 @@ namespace UnitySkills.Tests.Core
     /// noSceneAuthoring turns them off via rule 4 (MutatesScene ⇒ hidden); what guide withdraws is the
     /// category, not this flag, so only an execution-time check remains to turn them off. This is exactly the check pinned down here: guide refuses, full runs unchanged, nsa still hides them entirely.
     ///
-    /// EditorPrefs hygiene: <c>UnitySkills_SurfaceProfile</c> and the operating mode are both machine-level
-    /// keys shared globally per Unity version, not per project, so setup saves the original value and teardown restores it; each test sets its own profile explicitly.
+    /// Settings hygiene: <c>UnitySkills_SurfaceProfile</c> and the operating mode are per-project settings that, during a
+    /// test run, live in the in-memory store <see cref="ProjectPrefsTestIsolation"/> installs; setup still saves the original
+    /// value and teardown restores it so fixtures do not leak into each other; each test sets its own profile explicitly.
     /// Workflow history and batch tokens are both redirected to a temp directory / deleted when done; tests never write into the user's real history.
     /// </summary>
     [TestFixture]
@@ -57,9 +58,7 @@ namespace UnitySkills.Tests.Core
             // All of it is redirected to a temp file and deleted when done — the user's real history is never touched by this file.
             _tempRoot = Path.Combine(Path.GetTempPath(), "UnitySkillsGuideDetour_" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(_tempRoot);
-            WorkflowManager.OverrideHistoryFilePathForTests = Path.Combine(_tempRoot, "workflow_history.json");
-            WorkflowFileStore.OverrideStoreRootForTests = Path.Combine(_tempRoot, "workflow_files");
-            WorkflowManager.ResetStateForTests();
+            WorkflowManager.OverrideRootForTests(Path.Combine(_tempRoot, "workflow"));
 
             EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Single);
             GameObjectFinder.InvalidateCache();
@@ -80,9 +79,7 @@ namespace UnitySkills.Tests.Core
             }
 
             WorkflowManager.AbortTask();
-            WorkflowManager.ResetStateForTests();
-            WorkflowManager.OverrideHistoryFilePathForTests = null;
-            WorkflowFileStore.OverrideStoreRootForTests = null;
+            WorkflowManager.OverrideRootForTests(null);
             try { if (Directory.Exists(_tempRoot)) Directory.Delete(_tempRoot, true); } catch { }
 
             SkillsSurfaceProfile.Current = _savedProfile;
@@ -273,7 +270,10 @@ namespace UnitySkills.Tests.Core
             var revertTaskId = SeedTask(SceneSnapshot(probe));
             var sessionId = "guide-detour-session";
             SeedTask(new[] { SceneSnapshot(probe) }, sessionId);
-            var redoTaskId = SeedUndoneTask(SceneSnapshot(probe));
+            var redoTaskId = SeedRestore(SceneSnapshot(probe));
+            var restoreStep = NewTask(new[] { SceneSnapshot(probe) }, null);
+            restoreStep.seq = WorkflowManager.History.AllocateSeq();
+            WorkflowManager.History.tasks.Add(restoreStep);
 
             SkillsSurfaceProfile.Current = SurfaceProfileKind.Guide;
 
@@ -288,6 +288,9 @@ namespace UnitySkills.Tests.Core
                 SkillCategory.GameObject, "scene_object_snapshot");
             AssertCarriedWriteRefusal(
                 Envelope("workflow_redo_task", new JObject { ["taskId"] = redoTaskId }.ToString(Formatting.None)),
+                SkillCategory.GameObject, "scene_object_snapshot");
+            AssertCarriedWriteRefusal(
+                Envelope("workflow_restore", new JObject { ["to"] = "s" + restoreStep.seq, ["agents"] = "all" }.ToString(Formatting.None)),
                 SkillCategory.GameObject, "scene_object_snapshot");
 
             Assert.That(WorkflowManager.History.tasks.Any(t => t.id == undoTaskId), Is.True,
@@ -526,11 +529,26 @@ namespace UnitySkills.Tests.Core
             return task.id;
         }
 
-        private static string SeedUndoneTask(params ObjectSnapshot[] snapshots)
+        /// <summary>
+        /// Seeds a restore, as workflow_undo_task leaves it: its task holds the snapshots that workflow_redo_task re-applies. Returns
+        /// the restore's s&lt;seq&gt; id, which names it to workflow_redo_task.
+        /// </summary>
+        private static string SeedRestore(params ObjectSnapshot[] snapshots)
         {
-            var task = NewTask(snapshots, null);
-            WorkflowManager.GetUndoneStack().Add(task);
-            return task.id;
+            var history = WorkflowManager.History;
+            var restore = NewTask(snapshots, null);
+            restore.seq = history.AllocateSeq();
+            restore.agent = WorkflowManager.ResolveCallerAgent();
+            history.tasks.Add(restore);
+            history.restores.Add(new WorkflowRestoreRecord
+            {
+                seq = restore.seq,
+                to = "guide-detour",
+                guard = "c" + restore.seq,
+                agent = restore.agent,
+                steps = new List<long>()
+            });
+            return "s" + restore.seq;
         }
 
         private static WorkflowTask NewTask(IEnumerable<ObjectSnapshot> snapshots, string sessionId) => new WorkflowTask
